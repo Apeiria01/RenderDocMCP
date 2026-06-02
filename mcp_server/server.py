@@ -281,6 +281,40 @@ def get_pipeline_state(event_id: int) -> dict:
 
 
 @mcp.tool
+def list_shader_hashes(
+    stage: Literal["all", "vertex", "hull", "domain", "geometry", "pixel", "compute"] = "pixel",
+    event_id_min: int | None = None,
+    event_id_max: int | None = None,
+    unique_only: bool = False,
+    limit: int | None = None,
+) -> dict:
+    """
+    List ReShade/ShaderToggler-compatible shader hashes observed in the capture.
+
+    Args:
+        stage: Shader stage to inspect. Defaults to pixel. Use "all" to inspect all stages.
+        event_id_min: Optional minimum event ID.
+        event_id_max: Optional maximum event ID.
+        unique_only: If True, omit per-event rows and return only unique shaders.
+        limit: Optional maximum number of per-event rows to return.
+
+    Returns CRC32 hashes computed from RenderDoc's shader reflection raw bytecode,
+    with both decimal and hex values. This does not require a modified RenderDoc build.
+    """
+    params: dict[str, object] = {
+        "stage": stage,
+        "unique_only": unique_only,
+    }
+    if event_id_min is not None:
+        params["event_id_min"] = event_id_min
+    if event_id_max is not None:
+        params["event_id_max"] = event_id_max
+    if limit is not None:
+        params["limit"] = limit
+    return bridge.call("list_shader_hashes", params)
+
+
+@mcp.tool
 def list_captures(directory: str) -> dict:
     """
     List all RenderDoc capture files (.rdc) in the specified directory.

@@ -91,6 +91,7 @@ uv tool update-shell  # PATHに追加
 | `get_texture_info` | テクスチャのメタデータを取得 |
 | `get_texture_data` | テクスチャのピクセルデータを取得 (Base64) |
 | `get_pipeline_state` | パイプライン状態を取得 |
+| `list_shader_hashes` | シェーダーバイトコードのCRC32 hashを一覧 |
 
 ## 使用例
 
@@ -110,6 +111,13 @@ get_shader_info(event_id=123, stage="pixel")
 
 ```
 get_pipeline_state(event_id=123)
+```
+
+### シェーダーハッシュ一覧の取得
+
+```
+list_shader_hashes(stage="pixel", event_id_min=8000, event_id_max=9000)
+list_shader_hashes(stage="all", unique_only=true)
 ```
 
 ### テクスチャデータの取得

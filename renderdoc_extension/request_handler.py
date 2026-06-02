@@ -26,6 +26,7 @@ class RequestHandler:
             "get_texture_info": self._handle_get_texture_info,
             "get_texture_data": self._handle_get_texture_data,
             "get_pipeline_state": self._handle_get_pipeline_state,
+            "list_shader_hashes": self._handle_list_shader_hashes,
             "list_captures": self._handle_list_captures,
             "open_capture": self._handle_open_capture,
         }
@@ -169,6 +170,21 @@ class RequestHandler:
         if event_id is None:
             raise ValueError("event_id is required")
         return self.facade.get_pipeline_state(int(event_id))
+
+    def _handle_list_shader_hashes(self, params):
+        """Handle list_shader_hashes request"""
+        stage = params.get("stage", "pixel")
+        event_id_min = params.get("event_id_min")
+        event_id_max = params.get("event_id_max")
+        unique_only = params.get("unique_only", False)
+        limit = params.get("limit")
+        return self.facade.list_shader_hashes(
+            stage=stage,
+            event_id_min=int(event_id_min) if event_id_min is not None else None,
+            event_id_max=int(event_id_max) if event_id_max is not None else None,
+            unique_only=bool(unique_only),
+            limit=int(limit) if limit is not None else None,
+        )
 
     def _handle_list_captures(self, params):
         """Handle list_captures request"""

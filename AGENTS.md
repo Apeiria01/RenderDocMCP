@@ -7,7 +7,7 @@ RenderDoc UI拡張機能として動作するMCPサーバー。AIアシスタン
 **ハイブリッドプロセス分離方式**:
 
 ```
-Claude/AI Client (stdio)
+Codex/AI Client (stdio)
         │
         ▼
 MCP Server Process (標準Python + FastMCP 2.0)

@@ -135,3 +135,20 @@ class RenderDocFacade:
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
         return self._pipeline.get_pipeline_state(event_id)
+
+    def list_shader_hashes(
+        self,
+        stage="pixel",
+        event_id_min=None,
+        event_id_max=None,
+        unique_only=False,
+        limit=None,
+    ):
+        """List shader hashes observed in pipeline state events"""
+        return self._pipeline.list_shader_hashes(
+            stage=stage,
+            event_id_min=event_id_min,
+            event_id_max=event_id_max,
+            unique_only=unique_only,
+            limit=limit,
+        )
