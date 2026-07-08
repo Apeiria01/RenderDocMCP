@@ -125,48 +125,134 @@ class PipelineService:
 
             pipeline_info["shaders"] = stages
 
-            # Viewport and scissor
+            # Viewports (unified API exposes GetViewport(i) with no count, so probe
+            # indices and stop on the first that errors).
             try:
-                vp_scissor = pipe.GetViewportScissor()
-                if vp_scissor:
-                    viewports = []
-                    for v in vp_scissor.viewports:
-                        viewports.append(
-                            {
-                                "x": v.x,
-                                "y": v.y,
-                                "width": v.width,
-                                "height": v.height,
-                                "min_depth": v.minDepth,
-                                "max_depth": v.maxDepth,
-                            }
-                        )
+                viewports = []
+                for i in range(16):
+                    try:
+                        v = pipe.GetViewport(i)
+                    except Exception:
+                        break
+                    if v.width == 0.0 and v.height == 0.0:
+                        continue
+                    viewports.append({
+                        "index": i,
+                        "x": v.x,
+                        "y": v.y,
+                        "width": v.width,
+                        "height": v.height,
+                        "min_depth": v.minDepth,
+                        "max_depth": v.maxDepth,
+                    })
+                if viewports:
                     pipeline_info["viewports"] = viewports
-            except Exception:
-                pass
+            except Exception as e:
+                pipeline_info["viewports_error"] = str(e)
 
-            # Render targets
+            # Scissors (same probing approach).
             try:
-                om = pipe.GetOutputMerger()
-                if om:
-                    rts = []
-                    for i, rt in enumerate(om.renderTargets):
-                        if rt.resourceId != rd.ResourceId.Null():
-                            rts.append({"index": i, "resource_id": str(rt.resourceId)})
-                    pipeline_info["render_targets"] = rts
+                scissors = []
+                for i in range(16):
+                    try:
+                        s = pipe.GetScissor(i)
+                    except Exception:
+                        break
+                    if s.width == 0 and s.height == 0:
+                        continue
+                    scissors.append({
+                        "index": i,
+                        "x": s.x,
+                        "y": s.y,
+                        "width": s.width,
+                        "height": s.height,
+                    })
+                if scissors:
+                    pipeline_info["scissors"] = scissors
+            except Exception as e:
+                pipeline_info["scissors_error"] = str(e)
 
-                    if om.depthTarget.resourceId != rd.ResourceId.Null():
-                        pipeline_info["depth_target"] = str(om.depthTarget.resourceId)
-            except Exception:
-                pass
-
-            # Input assembly
+            # Render targets + depth target (unified descriptor API; each entry is
+            # a Descriptor whose bound resource is `.resource`).
             try:
-                ia = pipe.GetIAState()
-                if ia:
-                    pipeline_info["input_assembly"] = {"topology": str(ia.topology)}
-            except Exception:
-                pass
+                rts = []
+                for i, rt in enumerate(pipe.GetOutputTargets()):
+                    if rt.resource == rd.ResourceId.Null():
+                        continue
+                    rts.append({"index": i, "resource_id": str(rt.resource)})
+                pipeline_info["render_targets"] = rts
+
+                depth = pipe.GetDepthTarget()
+                if depth.resource != rd.ResourceId.Null():
+                    pipeline_info["depth_target"] = str(depth.resource)
+            except Exception as e:
+                pipeline_info["render_targets_error"] = str(e)
+
+            # Input assembly: topology, vertex buffers, input layout, index buffer.
+            # Each sub-block is guarded independently so a wrong API name in a
+            # given RenderDoc version degrades to an *_error field instead of
+            # silently dropping the whole IA section.
+            ia_info = {}
+
+            try:
+                ia_info["topology"] = str(pipe.GetPrimitiveTopology())
+            except Exception as e:
+                ia_info["topology_error"] = str(e)
+
+            # Raw vertex buffers bound on the IA (sticky API state). This count
+            # matches ReShade state_tracking's vertex_buffers (incl. unused slots).
+            try:
+                vbs = []
+                for slot, vb in enumerate(pipe.GetVBuffers()):
+                    if vb.resourceId == rd.ResourceId.Null():
+                        continue
+                    vbs.append({
+                        "slot": slot,
+                        "resource_id": str(vb.resourceId),
+                        "byte_offset": vb.byteOffset,
+                        "byte_stride": vb.byteStride,
+                        "byte_size": vb.byteSize,
+                    })
+                ia_info["vertex_buffers"] = vbs
+            except Exception as e:
+                ia_info["vertex_buffers_error"] = str(e)
+
+            # Input layout attributes. `used` + `vb_slot` reveal which VB slots
+            # the current layout actually consumes -- i.e. what RenderDoc's IA
+            # panel shows. used_vb_slots vs vertex_buffers exposes stale binds.
+            try:
+                attrs = []
+                used_slots = set()
+                for a in pipe.GetVertexInputs():
+                    slot = int(a.vertexBuffer)
+                    attrs.append({
+                        "name": a.name,
+                        "vb_slot": slot,
+                        "byte_offset": a.byteOffset,
+                        "format": a.format.Name(),
+                        "per_instance": bool(a.perInstance),
+                        "used": bool(a.used),
+                    })
+                    if a.used and slot >= 0:
+                        used_slots.add(slot)
+                ia_info["vertex_inputs"] = attrs
+                ia_info["used_vb_slots"] = sorted(used_slots)
+            except Exception as e:
+                ia_info["vertex_inputs_error"] = str(e)
+
+            try:
+                ib = pipe.GetIBuffer()
+                if ib.resourceId != rd.ResourceId.Null():
+                    ia_info["index_buffer"] = {
+                        "resource_id": str(ib.resourceId),
+                        "byte_offset": ib.byteOffset,
+                        "byte_stride": ib.byteStride,
+                    }
+            except Exception as e:
+                ia_info["index_buffer_error"] = str(e)
+
+            if ia_info:
+                pipeline_info["input_assembly"] = ia_info
 
             result["pipeline"] = pipeline_info
 
@@ -175,6 +261,102 @@ class PipelineService:
         if result["error"]:
             raise ValueError(result["error"])
         return result["pipeline"]
+
+    def list_set_render_targets(self):
+        """Enumerate every OMSetRenderTargets call, tag each with its enclosing
+        debug marker (in-pass vs out-of-pass), and resolve the bound rtv[0]."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"data": None, "error": None}
+
+        def callback(controller):
+            sdfile = controller.GetStructuredFile()
+            num_chunks = len(sdfile.chunks)
+
+            # Pass 1: walk the action tree tracking the marker stack, and collect
+            # every OMSetRenderTargets event. It is a state-setting call (not an
+            # action), so it only shows up inside each action's `events` list.
+            calls = []
+
+            def walk(action, marker_stack):
+                for ev in action.events:
+                    ci = ev.chunkIndex
+                    if ci >= num_chunks:
+                        continue
+                    try:
+                        name = sdfile.chunks[ci].name
+                    except Exception:
+                        continue
+                    if "OMSetRenderTargets" in name:
+                        calls.append({
+                            "event_id": ev.eventId,
+                            "chunk": name,
+                            "marker": marker_stack[-1] if marker_stack else None,
+                            "in_colour_pass": any("Colour Pass" in m for m in marker_stack),
+                            "in_any_marker": len(marker_stack) > 0,
+                        })
+                # A PushMarker action's own events belong to the PARENT scope, so
+                # push the marker only when descending into its children.
+                next_stack = marker_stack
+                if action.flags & rd.ActionFlags.PushMarker:
+                    next_stack = marker_stack + [action.GetName(sdfile)]
+                for child in action.children:
+                    walk(child, next_stack)
+
+            for root in controller.GetRootActions():
+                walk(root, [])
+
+            # Pass 2: resolve rtv[0]/dsv per call. Ascending eid order lets RenderDoc
+            # replay forward incrementally instead of restarting for each event.
+            calls.sort(key=lambda c: c["event_id"])
+            for c in calls:
+                try:
+                    controller.SetFrameEvent(c["event_id"], False)
+                    pipe = controller.GetPipelineState()
+                    targets = pipe.GetOutputTargets()
+                    c["rt_count"] = sum(
+                        1 for t in targets if t.resource != rd.ResourceId.Null()
+                    )
+                    if targets and targets[0].resource != rd.ResourceId.Null():
+                        c["rtv0"] = str(targets[0].resource)
+                        c["rtv0_view"] = str(targets[0].view)
+                    else:
+                        c["rtv0"] = None
+                        c["rtv0_view"] = None
+                    depth = pipe.GetDepthTarget()
+                    c["dsv"] = (
+                        str(depth.resource)
+                        if depth.resource != rd.ResourceId.Null()
+                        else None
+                    )
+                except Exception as e:
+                    c["resolve_error"] = str(e)
+
+            in_pass = [c for c in calls if c["in_colour_pass"]]
+            out_pass = [c for c in calls if not c["in_colour_pass"]]
+
+            def rtv0_histogram(items):
+                hist = {}
+                for c in items:
+                    key = c.get("rtv0") or "(none)"
+                    hist[key] = hist.get(key, 0) + 1
+                return hist
+
+            result["data"] = {
+                "total": len(calls),
+                "in_colour_pass_count": len(in_pass),
+                "out_of_colour_pass_count": len(out_pass),
+                "in_pass_rtv0_histogram": rtv0_histogram(in_pass),
+                "out_pass_rtv0_histogram": rtv0_histogram(out_pass),
+                "calls": calls,
+            }
+
+        self._invoke(callback)
+
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["data"]
 
     def list_shader_hashes(
         self,
@@ -561,17 +743,19 @@ class PipelineService:
             }
 
             try:
-                bind = pipe.GetConstantBuffer(stage, i, 0)
-                if bind.resourceId != rd.ResourceId.Null():
+                # GetConstantBuffer was removed; the unified API returns a
+                # UsedDescriptor whose `.descriptor` carries the bound buffer.
+                bind = pipe.GetConstantBlock(stage, i, 0)
+                if bind.descriptor.resource != rd.ResourceId.Null():
                     variables = controller.GetCBufferVariableContents(
                         pipe.GetGraphicsPipelineObject(),
                         reflection.resourceId,
                         stage,
                         reflection.entryPoint,
                         i,
-                        bind.resourceId,
-                        bind.byteOffset,
-                        bind.byteSize,
+                        bind.descriptor.resource,
+                        bind.descriptor.byteOffset,
+                        bind.descriptor.byteSize,
                     )
                     cb_info["variables"] = Serializers.serialize_variables(variables)
             except Exception as e:

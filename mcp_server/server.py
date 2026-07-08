@@ -29,6 +29,22 @@ def get_capture_status() -> dict:
 
 
 @mcp.tool
+def get_bookmarks() -> dict:
+    """
+    Get the Event Browser bookmarks set on the current capture in RenderDoc.
+
+    These are the bookmarks the user added in the RenderDoc UI (Ctrl+B on an
+    event). Returns:
+      - loaded: whether a capture is loaded
+      - count: number of bookmarks
+      - bookmarks: list of {eventId, text}, sorted by eventId
+
+    Bookmarks are saved inside the .rdc capture, so they persist across sessions.
+    """
+    return bridge.call("get_bookmarks")
+
+
+@mcp.tool
 def get_draw_calls(
     include_children: bool = True,
     marker_filter: str | None = None,
@@ -278,6 +294,25 @@ def get_pipeline_state(event_id: int) -> dict:
     - Viewports and input assembly state
     """
     return bridge.call("get_pipeline_state", {"event_id": event_id})
+
+
+@mcp.tool
+def list_set_render_targets() -> dict:
+    """
+    Enumerate every OMSetRenderTargets call in the capture.
+
+    OMSetRenderTargets is a state-setting call (not a draw/dispatch), so it is NOT
+    returned by get_draw_calls. This walks the structured event list to find them.
+
+    For each call, reports: event_id, the enclosing debug marker, whether it is
+    inside a "Colour Pass" marker (in_colour_pass), the bound rtv[0] resource and
+    view, the render-target count, and the depth target.
+
+    Also returns rtv[0] histograms for in-pass vs out-of-pass calls, so you can see
+    how render targets differ between the marked geometry/UI passes and the
+    post-processing / composite steps between them.
+    """
+    return bridge.call("list_set_render_targets", {})
 
 
 @mcp.tool

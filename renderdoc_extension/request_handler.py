@@ -13,6 +13,7 @@ class RequestHandler:
         self.facade = facade
         self._methods = {
             "ping": self._handle_ping,
+            "get_bookmarks": self._handle_get_bookmarks,
             "get_capture_status": self._handle_get_capture_status,
             "get_draw_calls": self._handle_get_draw_calls,
             "get_frame_summary": self._handle_get_frame_summary,
@@ -26,6 +27,7 @@ class RequestHandler:
             "get_texture_info": self._handle_get_texture_info,
             "get_texture_data": self._handle_get_texture_data,
             "get_pipeline_state": self._handle_get_pipeline_state,
+            "list_set_render_targets": self._handle_list_set_render_targets,
             "list_shader_hashes": self._handle_list_shader_hashes,
             "list_captures": self._handle_list_captures,
             "open_capture": self._handle_open_capture,
@@ -59,6 +61,15 @@ class RequestHandler:
     def _handle_ping(self, params):
         """Handle ping request"""
         return {"status": "ok", "message": "pong"}
+
+    def _handle_get_bookmarks(self, params):
+        """Handle get_bookmarks request.
+
+        Reads the current Event Browser bookmarks from the CaptureContext.
+        Each bookmark has an eventId and optional text. Runs on the RenderDoc
+        UI thread (handler is driven by a QTimer), so direct ctx access is safe.
+        """
+        return self.facade.get_bookmarks()
 
     def _handle_get_capture_status(self, params):
         """Handle get_capture_status request"""
@@ -170,6 +181,10 @@ class RequestHandler:
         if event_id is None:
             raise ValueError("event_id is required")
         return self.facade.get_pipeline_state(int(event_id))
+
+    def _handle_list_set_render_targets(self, params):
+        """Handle list_set_render_targets request"""
+        return self.facade.list_set_render_targets()
 
     def _handle_list_shader_hashes(self, params):
         """Handle list_shader_hashes request"""

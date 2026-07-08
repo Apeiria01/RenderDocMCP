@@ -34,23 +34,21 @@ class ResourceService:
         result = {"data": None, "error": None}
 
         def callback(controller):
-            # Parse resource ID
-            try:
-                rid = Parsers.parse_resource_id(resource_id)
-            except Exception:
-                result["error"] = "Invalid resource ID: %s" % resource_id
-                return
-
-            # Find buffer
+            # Resolve the buffer by numeric id. A ResourceId cannot be constructed
+            # from a raw integer in the Python bindings (its `id` field is private),
+            # so match against the live buffer list instead.
+            target_id = Parsers.extract_numeric_id(resource_id)
             buf_desc = None
             for buf in controller.GetBuffers():
-                if buf.resourceId == rid:
+                if Parsers.extract_numeric_id(str(buf.resourceId)) == target_id:
                     buf_desc = buf
                     break
 
             if not buf_desc:
                 result["error"] = "Buffer not found: %s" % resource_id
                 return
+
+            rid = buf_desc.resourceId
 
             # Get data
             actual_length = length if length > 0 else buf_desc.length

@@ -123,19 +123,17 @@ class SearchService:
                 except Exception:
                     pass
 
-            # Check render targets
+            # Check render targets (unified descriptor API)
             try:
-                om = pipe.GetOutputMerger()
-                if om:
-                    for i, rt in enumerate(om.renderTargets):
-                        if rt.resourceId != rd.ResourceId.Null():
-                            res_name = ""
-                            try:
-                                res_name = ctx.GetResourceName(rt.resourceId)
-                            except Exception:
-                                pass
-                            if res_name and texture_name.lower() in res_name.lower():
-                                return "RenderTarget[%d]: '%s'" % (i, res_name)
+                for i, rt in enumerate(pipe.GetOutputTargets()):
+                    if rt.resource != rd.ResourceId.Null():
+                        res_name = ""
+                        try:
+                            res_name = ctx.GetResourceName(rt.resource)
+                        except Exception:
+                            pass
+                        if res_name and texture_name.lower() in res_name.lower():
+                            return "RenderTarget[%d]: '%s'" % (i, res_name)
             except Exception:
                 pass
 
@@ -145,43 +143,47 @@ class SearchService:
 
     def find_draws_by_resource(self, resource_id):
         """Find all draw calls using a specific resource ID (exact match)."""
-        target_rid = Parsers.parse_resource_id(resource_id)
+        # Compare by canonical string form. A ResourceId cannot be constructed from a
+        # raw integer in the Python bindings (its `id` field is private), so the old
+        # parse_resource_id produced a Null id that matched every empty bind slot.
+        target_str = "ResourceId::%d" % Parsers.extract_numeric_id(resource_id)
         stages_to_check = Helpers.get_all_shader_stages()
 
         def matcher(pipe, controller, action, ctx):
+            null = rd.ResourceId.Null()
+
             # Check shaders
             for stage in stages_to_check:
                 shader = pipe.GetShader(stage)
-                if shader == target_rid:
+                if shader != null and str(shader) == target_str:
                     return "%s shader" % str(stage)
 
             # Check SRVs and UAVs
             for stage in stages_to_check:
                 try:
-                    srvs = pipe.GetReadOnlyResources(stage, False)
-                    for srv in srvs:
-                        if srv.descriptor.resource == target_rid:
+                    for srv in pipe.GetReadOnlyResources(stage, False):
+                        res = srv.descriptor.resource
+                        if res != null and str(res) == target_str:
                             return "%s SRV slot %d" % (str(stage), srv.access.index)
                 except Exception:
                     pass
 
                 try:
-                    uavs = pipe.GetReadWriteResources(stage, False)
-                    for uav in uavs:
-                        if uav.descriptor.resource == target_rid:
+                    for uav in pipe.GetReadWriteResources(stage, False):
+                        res = uav.descriptor.resource
+                        if res != null and str(res) == target_str:
                             return "%s UAV slot %d" % (str(stage), uav.access.index)
                 except Exception:
                     pass
 
-            # Check render targets
+            # Check render targets + depth target (unified descriptor API)
             try:
-                om = pipe.GetOutputMerger()
-                if om:
-                    for i, rt in enumerate(om.renderTargets):
-                        if rt.resourceId == target_rid:
-                            return "RenderTarget[%d]" % i
-                    if om.depthTarget.resourceId == target_rid:
-                        return "DepthTarget"
+                for i, rt in enumerate(pipe.GetOutputTargets()):
+                    if rt.resource != null and str(rt.resource) == target_str:
+                        return "RenderTarget[%d]" % i
+                depth = pipe.GetDepthTarget()
+                if depth.resource != null and str(depth.resource) == target_str:
+                    return "DepthTarget"
             except Exception:
                 pass
 

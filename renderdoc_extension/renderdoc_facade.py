@@ -51,6 +51,27 @@ class RenderDocFacade:
         """Check if a capture is loaded and get API info"""
         return self._capture.get_capture_status()
 
+    def get_bookmarks(self):
+        """Get the Event Browser bookmarks set on this capture.
+
+        Returns {loaded, count, bookmarks:[{eventId, text}]}. Bookmarks are a
+        UI-level concept owned by ICaptureContext; GetBookmarks() is a plain UI
+        call so no BlockInvoke onto the replay thread is required.
+        """
+        if not self.ctx.IsCaptureLoaded():
+            return {"loaded": False, "count": 0, "bookmarks": []}
+
+        marks = self.ctx.GetBookmarks()
+        result = []
+        for m in marks:
+            try:
+                text = str(m.text)
+            except Exception:
+                text = ""
+            result.append({"eventId": int(m.eventId), "text": text})
+        result.sort(key=lambda b: b["eventId"])
+        return {"loaded": True, "count": len(result), "bookmarks": result}
+
     def list_captures(self, directory):
         """List all .rdc files in the specified directory"""
         return self._capture.list_captures(directory)
@@ -135,6 +156,10 @@ class RenderDocFacade:
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
         return self._pipeline.get_pipeline_state(event_id)
+
+    def list_set_render_targets(self):
+        """Enumerate OMSetRenderTargets calls with in/out-pass classification and rtv[0]"""
+        return self._pipeline.list_set_render_targets()
 
     def list_shader_hashes(
         self,
