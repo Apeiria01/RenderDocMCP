@@ -9,3 +9,5 @@ build/
 *.egg-info/
 PROGRESS.md
 .vscode
+.mcp.json
+.vs

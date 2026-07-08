@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "renderdoc": {
-      "command": "renderdoc-mcp"
-    }
-  }
-}
