@@ -41,6 +41,8 @@ RenderDocMCP/
 
 | ツール名 | 説明 |
 |---------|------|
+| `list_instances` | 起動中のRenderDocインスタンス一覧（pid・読込中キャプチャ） |
+| `select_instance` | 以降のツール呼び出しの対象インスタンスをpidで選択 |
 | `list_captures` | 指定ディレクトリ内の.rdcファイル一覧を取得 |
 | `open_capture` | キャプチャファイルを開く（既存キャプチャは自動で閉じる） |
 | `get_capture_status` | キャプチャ読込状態確認 |
@@ -116,12 +118,16 @@ get_action_timings(marker_filter="Camera.Render", exclude_markers=["GUI.Repaint"
 
 ## 通信プロトコル
 
-ファイルベースIPC:
-- IPCディレクトリ: `%TEMP%/renderdoc_mcp/`
-- `request.json`: リクエスト（MCPサーバー → RenderDoc）
-- `response.json`: レスポンス（RenderDoc → MCPサーバー）
-- `lock`: 書き込み中ロックファイル
+ファイルベースIPC（マルチインスタンス対応）:
+- インスタンス毎メールボックス: `%TEMP%/renderdoc_mcp/instances/<pid>/`
+  - `request.json`: リクエスト（MCPサーバー → RenderDoc）
+  - `response.json`: レスポンス（RenderDoc → MCPサーバー、応答元pid付き）
+  - `lock`: 書き込み中ロックファイル
+  - `info.json`: インスタンス情報＋ハートビート（約2秒毎更新、発見用）
 - ポーリング間隔: 100ms（RenderDoc側）
+- インスタンスが1つなら自動選択、複数なら `select_instance(pid)` で選択が必要
+- 旧拡張機能（単一メールボックス `%TEMP%/renderdoc_mcp/request.json`）へは
+  インスタンスメールボックスが1つも無い場合のみフォールバック
 
 ## 開発ノート
 

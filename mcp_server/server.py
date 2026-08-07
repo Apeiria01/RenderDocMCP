@@ -20,6 +20,36 @@ bridge = RenderDocBridge(host=settings.renderdoc_host, port=settings.renderdoc_p
 
 
 @mcp.tool
+def list_instances() -> dict:
+    """
+    List all running RenderDoc instances reachable via the MCP bridge.
+
+    Each instance is identified by its process id (pid) and reports which
+    capture file it currently has loaded. Returns:
+      - count: number of live instances
+      - selected_pid: pid that subsequent tool calls will talk to (null if none)
+      - instances: list of {pid, loaded, filename, renderdoc_version,
+        heartbeat_age_sec, selected}
+
+    With a single instance it is selected automatically. With multiple
+    instances you must call select_instance(pid) before using other tools.
+    """
+    return bridge.list_instances()
+
+
+@mcp.tool
+def select_instance(pid: int) -> dict:
+    """
+    Select which RenderDoc instance subsequent tool calls talk to.
+
+    Use list_instances to see the available pids and which capture each
+    instance has loaded. The selection persists until that instance exits.
+    Returns the selected instance's info.
+    """
+    return bridge.select_instance(pid)
+
+
+@mcp.tool
 def get_capture_status() -> dict:
     """
     Check if a capture is currently loaded in RenderDoc.
