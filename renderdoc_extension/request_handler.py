@@ -155,7 +155,9 @@ class RequestHandler:
             raise ValueError("resource_id is required")
         offset = params.get("offset", 0)
         length = params.get("length", 0)
-        return self.facade.get_buffer_contents(resource_id, offset, length)
+        return self.facade.get_buffer_contents(
+            resource_id, offset, length, event_id=params.get("event_id")
+        )
 
     def _handle_get_texture_info(self, params):
         """Handle get_texture_info request"""
@@ -173,7 +175,10 @@ class RequestHandler:
         slice_idx = params.get("slice", 0)
         sample = params.get("sample", 0)
         depth_slice = params.get("depth_slice")  # None = full volume
-        return self.facade.get_texture_data(resource_id, mip, slice_idx, sample, depth_slice)
+        return self.facade.get_texture_data(
+            resource_id, mip, slice_idx, sample, depth_slice,
+            event_id=params.get("event_id"),
+        )
 
     def _handle_get_pipeline_state(self, params):
         """Handle get_pipeline_state request"""

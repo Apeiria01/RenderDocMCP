@@ -6,6 +6,7 @@ FastMCP 2.0 server providing access to RenderDoc capture data.
 from typing import Literal
 
 from fastmcp import FastMCP
+from pydantic import StrictInt
 
 from .bridge.client import RenderDocBridge, RenderDocBridgeError
 from .config import settings
@@ -245,8 +246,9 @@ def get_shader_info(
 @mcp.tool
 def get_buffer_contents(
     resource_id: str,
-    offset: int = 0,
-    length: int = 0,
+    offset: StrictInt = 0,
+    length: StrictInt = 0,
+    event_id: StrictInt | None = None,
 ) -> dict:
     """
     Read the contents of a buffer resource.
@@ -254,14 +256,18 @@ def get_buffer_contents(
     Args:
         resource_id: The resource ID of the buffer to read
         offset: Byte offset to start reading from (default: 0)
-        length: Number of bytes to read, 0 for entire buffer (default: 0)
+        length: Number of bytes to read, 0 for the remainder from offset (default: 0)
+        event_id: Optional positive event ID. When provided, replay to immediately
+                  after this event and read the buffer in one replay callback.
+                  Omit to read the existing replay state without moving it.
 
-    Returns buffer data as base64-encoded bytes along with metadata.
+    Returns base64-encoded bytes and metadata, including event_id (null when omitted).
+    The selected replay state remains at event_id. This does not change the GUI selection.
     """
-    return bridge.call(
-        "get_buffer_contents",
-        {"resource_id": resource_id, "offset": offset, "length": length},
-    )
+    params = {"resource_id": resource_id, "offset": offset, "length": length}
+    if event_id is not None:
+        params["event_id"] = event_id
+    return bridge.call("get_buffer_contents", params)
 
 
 @mcp.tool
@@ -284,6 +290,7 @@ def get_texture_data(
     slice: int = 0,
     sample: int = 0,
     depth_slice: int | None = None,
+    event_id: StrictInt | None = None,
 ) -> dict:
     """
     Read the pixel data of a texture resource.
@@ -296,13 +303,19 @@ def get_texture_data(
         sample: MSAA sample index (default: 0)
         depth_slice: For 3D textures only, extract a specific depth slice (default: None = full volume)
                      When specified, returns only the 2D slice at that depth index
+        event_id: Optional positive event ID. When provided, replay to immediately
+                  after this event and read the texture in one replay callback.
+                  Omit to read the existing replay state without moving it.
 
-    Returns texture pixel data as base64-encoded bytes along with metadata
-    including dimensions at the requested mip level and format information.
+    Returns raw texture bytes as base64 (not a PNG), dimensions, format and event_id
+    (null when omitted). The selected replay state remains at event_id.
+    This does not change the GUI selection.
     """
     params = {"resource_id": resource_id, "mip": mip, "slice": slice, "sample": sample}
     if depth_slice is not None:
         params["depth_slice"] = depth_slice
+    if event_id is not None:
+        params["event_id"] = event_id
     return bridge.call("get_texture_data", params)
 
 

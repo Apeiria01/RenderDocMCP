@@ -11,3 +11,4 @@ PROGRESS.md
 .vscode
 .mcp.json
 .vs
+tests/

@@ -26,11 +26,45 @@ class ResourceService:
                 return tex
         return None
 
-    def get_buffer_contents(self, resource_id, offset=0, length=0):
-        """Get buffer data"""
+    @staticmethod
+    def _validate_event_id(event_id):
+        if event_id is not None and (
+            isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0
+        ):
+            raise ValueError("event_id must be a positive integer")
+
+    @staticmethod
+    def _validate_byte_range(offset, length):
+        for name, value in (("offset", offset), ("length", length)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("%s must be a non-negative integer" % name)
+
+    @staticmethod
+    def _select_event(controller, event_id):
+        """Validate and select an event within the caller's replay callback."""
+        if event_id is None:
+            return
+
+        # Include API events between actions, not just draw/dispatch event IDs.
+        pending = list(controller.GetRootActions())
+        while pending:
+            action = pending.pop()
+            if action.eventId == event_id or any(
+                event.eventId == event_id for event in action.events
+            ):
+                # Reuse the current state when reading several resources at one event.
+                controller.SetFrameEvent(event_id, False)
+                return
+            pending.extend(action.children)
+        raise ValueError("Event not found in capture: %d" % event_id)
+
+    def get_buffer_contents(self, resource_id, offset=0, length=0, event_id=None):
+        """Read buffer bytes, optionally immediately after a specific event."""
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
+        self._validate_event_id(event_id)
+        self._validate_byte_range(offset, length)
         result = {"data": None, "error": None}
 
         def callback(controller):
@@ -50,12 +84,27 @@ class ResourceService:
 
             rid = buf_desc.resourceId
 
-            # Get data
-            actual_length = length if length > 0 else buf_desc.length
-            data = controller.GetBufferData(rid, offset, actual_length)
+            if offset > buf_desc.length:
+                result["error"] = "offset exceeds buffer size"
+                return
+            remaining = buf_desc.length - offset
+            if length > remaining:
+                result["error"] = "length exceeds remaining buffer size"
+                return
+            actual_length = length if length > 0 else remaining
+
+            # Selection and readback must stay in the same BlockInvoke callback.
+            try:
+                self._select_event(controller, event_id)
+                data = (controller.GetBufferData(rid, offset, actual_length)
+                        if actual_length else b"")
+            except Exception as e:
+                result["error"] = "Failed to read buffer: %s" % str(e)
+                return
 
             result["data"] = {
                 "resource_id": resource_id,
+                "event_id": event_id,
                 "length": len(data),
                 "total_size": buf_desc.length,
                 "offset": offset,
@@ -105,11 +154,13 @@ class ResourceService:
             raise ValueError(result["error"])
         return result["texture"]
 
-    def get_texture_data(self, resource_id, mip=0, slice=0, sample=0, depth_slice=None):
-        """Get texture pixel data."""
+    def get_texture_data(self, resource_id, mip=0, slice=0, sample=0, depth_slice=None,
+                         event_id=None):
+        """Read texture bytes, optionally immediately after a specific event."""
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
+        self._validate_event_id(event_id)
         result = {"data": None, "error": None}
 
         def callback(controller):
@@ -171,8 +222,9 @@ class ResourceService:
             sub.slice = slice
             sub.sample = sample
 
-            # Get texture data
+            # Selection and readback must stay in the same BlockInvoke callback.
             try:
+                self._select_event(controller, event_id)
                 data = controller.GetTextureData(tex_desc.resourceId, sub)
             except Exception as e:
                 result["error"] = "Failed to get texture data: %s" % str(e)
@@ -190,6 +242,7 @@ class ResourceService:
 
             result["data"] = {
                 "resource_id": resource_id,
+                "event_id": event_id,
                 "width": mip_width,
                 "height": mip_height,
                 "depth": output_depth,

@@ -135,17 +135,22 @@ class RenderDocFacade:
 
     # ==================== Resource Operations ====================
 
-    def get_buffer_contents(self, resource_id, offset=0, length=0):
-        """Get buffer data"""
-        return self._resource.get_buffer_contents(resource_id, offset, length)
+    def get_buffer_contents(self, resource_id, offset=0, length=0, event_id=None):
+        """Get buffer data, optionally immediately after a specific event."""
+        return self._resource.get_buffer_contents(
+            resource_id, offset, length, event_id=event_id
+        )
 
     def get_texture_info(self, resource_id):
         """Get texture metadata"""
         return self._resource.get_texture_info(resource_id)
 
-    def get_texture_data(self, resource_id, mip=0, slice=0, sample=0, depth_slice=None):
-        """Get texture pixel data"""
-        return self._resource.get_texture_data(resource_id, mip, slice, sample, depth_slice)
+    def get_texture_data(self, resource_id, mip=0, slice=0, sample=0, depth_slice=None,
+                         event_id=None):
+        """Get texture bytes, optionally immediately after a specific event."""
+        return self._resource.get_texture_data(
+            resource_id, mip, slice, sample, depth_slice, event_id=event_id
+        )
 
     # ==================== Pipeline Operations ====================
 

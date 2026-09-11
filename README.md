@@ -120,6 +120,38 @@ list_shader_hashes(stage="pixel", event_id_min=8000, event_id_max=9000)
 list_shader_hashes(stage="all", unique_only=true)
 ```
 
+### 指定イベントのリソース取得
+
+`get_texture_data` と `get_buffer_contents` は `event_id` を指定できる。
+指定したイベントの実行直後まで移動してから、同一の replay callback 内でデータを読み出す。
+事前の `get_pipeline_state` 呼び出しは不要。
+
+```python
+get_texture_data(event_id=1200, resource_id="ResourceId::22573", mip=0, slice=0, sample=0)
+get_buffer_contents(event_id=1200, resource_id="ResourceId::12345", offset=256, length=512)
+```
+
+- `event_id` はキャプチャ内に存在する正の整数。draw/dispatch 以外の API イベントも指定可能。
+- `resource_id` は `"ResourceId::12345"` または数値文字列 `"12345"`。
+- 応答には読み出しに使用した `event_id` が含まれる。
+- `event_id` を省略すると従来どおり現在の replay 状態を読み、応答の `event_id` は `null`。
+  GUI の選択イベントと replay 状態は一致するとは限らないため、GUI の ID を代入しない。
+- 読み出し後も replay は指定イベントに留まる。GUI の選択表示は変更しない。
+- 同じイベントを連続して指定する場合は `SetFrameEvent(event_id, False)` で現在の状態を再利用する。
+- buffer の `length=0` は `offset` から末尾まで。負の値や範囲外の読み出しはエラー。
+- 内容は `content_base64` に入る生バイト列。テクスチャの PNG/DDS 変換は行わない。
+
+MCP サーバーと RenderDoc 拡張の両方を更新する必要がある。
+
+```powershell
+uv pip install --python .venv/Scripts/python.exe --reinstall-package renderdoc-mcp -e . --no-deps
+.venv/Scripts/python.exe scripts/install_extension.py
+```
+
+更新後、MCP クライアント側の接続を再起動する。起動中の RenderDoc では Python Shell から
+`pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")` を実行すると、
+キャプチャを閉じずに拡張を再読み込みできる。RenderDoc が起動していなければ次回起動時に反映される。
+
 ### テクスチャデータの取得
 
 ```
