@@ -30,7 +30,10 @@ LEGACY_REQUEST_FILE = os.path.join(IPC_ROOT, "request.json")
 LEGACY_RESPONSE_FILE = os.path.join(IPC_ROOT, "response.json")
 LEGACY_LOCK_FILE = os.path.join(IPC_ROOT, "lock")
 
-STALE_SECS = 60  # dead-pid mailboxes older than this get pruned
+SAFE_SEARCH_METHODS = frozenset({
+    "find_draws_by_texture", "find_draws_by_resource", "find_draws_by_shader",
+    "find_resource_usage",
+})
 
 
 class RenderDocBridgeError(Exception):
@@ -39,34 +42,65 @@ class RenderDocBridgeError(Exception):
     pass
 
 
-if sys.platform == "win32":
-    import ctypes
-
-    def _pid_alive(pid: int) -> bool:
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+def _pid_alive(pid: int) -> bool:
+    """False only for a definitely dead PID; access denied is not death."""
+    if not isinstance(pid, int) or pid <= 0:
+        return True
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
-            return False
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER
         try:
             code = ctypes.c_ulong()
             if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return code.value == STILL_ACTIVE
+                return code.value == 259  # STILL_ACTIVE
             return True
         finally:
             kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
 
-else:
 
-    def _pid_alive(pid: int) -> bool:
+def _atomic_write_json(path, value):
+    tmp = path + "." + uuid.uuid4().hex + ".tmp"
+    try:
+        with open(tmp, "x", encoding="utf-8") as stream:
+            json.dump(value, stream)
+        os.replace(tmp, path)
+    finally:
         try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
+            os.remove(tmp)
         except OSError:
-            return True
+            pass
+
+
+def _request_path(directory, kind, request_id):
+    encoded = str(request_id).encode("utf-8")
+    if len(encoded) > 100:
+        raise ValueError("IPC request id exceeds 100 UTF-8 bytes")
+    key = encoded.hex()
+    return os.path.join(directory, "%s-%s.json" % (kind, key))
+
+
+def _remove_owned_json(path, request_id):
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            value = json.load(stream)
+        if value.get("id") == request_id:
+            os.remove(path)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 class RenderDocBridge:
@@ -106,17 +140,18 @@ class RenderDocBridge:
                     os.path.join(dirpath, "info.json"), "r", encoding="utf-8"
                 ) as f:
                     info = json.load(f)
+                if not isinstance(info, dict):
+                    info = {}
             except (OSError, ValueError):
                 # info.json missing or mid-write; fall through to pid check
                 pass
 
-            # Prune only on positive evidence: dead pid, or a published
-            # heartbeat that has gone stale. A mailbox whose info.json hasn't
-            # appeared yet belongs to an instance that is still starting up.
+            # A replay can keep the UI heartbeat stale for minutes. Prune
+            # only a definitely dead PID, never an unresponsive live process.
             heartbeat = info.get("heartbeat")
-            if not _pid_alive(pid) or (
-                heartbeat is not None and now - heartbeat > STALE_SECS
-            ):
+            if not isinstance(heartbeat, (int, float)):
+                heartbeat = None
+            if not _pid_alive(pid):
                 shutil.rmtree(dirpath, ignore_errors=True)
                 continue
 
@@ -126,6 +161,8 @@ class RenderDocBridge:
                     "loaded": info.get("loaded", False),
                     "filename": info.get("filename"),
                     "renderdoc_version": info.get("renderdoc_version"),
+                    "protocol_version": info.get("protocol_version"),
+                    "capabilities": info.get("capabilities", {}),
                     "heartbeat_age_sec": round(now - heartbeat, 1)
                     if heartbeat is not None
                     else None,
@@ -206,6 +243,29 @@ class RenderDocBridge:
             "Call select_instance(pid) to choose which one to talk to."
         )
 
+    def _require_safe_search(self, target_pid):
+        """Fail before publishing searches to an old, potentially quadratic server."""
+        info = {}
+        if target_pid is not None:
+            try:
+                path = os.path.join(INSTANCES_DIR, str(target_pid), "info.json")
+                with open(path, "r", encoding="utf-8") as stream:
+                    info = json.load(stream)
+            except (OSError, ValueError):
+                pass
+        if isinstance(info, dict):
+            protocol = info.get("protocol_version")
+            capabilities = info.get("capabilities")
+            safe_search = capabilities.get("safe_search") if isinstance(capabilities, dict) else None
+            if (isinstance(protocol, int) and protocol >= 2
+                    and isinstance(safe_search, int) and safe_search >= 1):
+                return
+        raise RenderDocBridgeError(
+            "The selected RenderDoc extension does not advertise safe search "
+            "(IPC protocol 2, safe_search capability). Reload the updated MCP "
+            "Bridge extension in RenderDoc, then retry. No search request was sent."
+        )
+
     # ------------------------------------------------------------------
     # Calls
     # ------------------------------------------------------------------
@@ -220,6 +280,8 @@ class RenderDocBridge:
                 )
 
             target_pid = self._resolve_target()
+            if method in SAFE_SEARCH_METHODS:
+                self._require_safe_search(target_pid)
             if target_pid is None:
                 return self._exchange(
                     method,
@@ -253,73 +315,101 @@ class RenderDocBridge:
             "id": str(uuid.uuid4()),
             "method": method,
             "params": params or {},
+            "deadline": time.time() + self.timeout,
+            "response_mode": "per_request",
         }
+        mailbox = os.path.dirname(request_file)
+        own_response = _request_path(mailbox, "response", request["id"])
+        cancel_file = _request_path(mailbox, "cancel", request["id"])
+        active_file = os.path.join(mailbox, "active.json")
+        client_lock = os.path.join(mailbox, "client.lock")
+        acquired = False
+        submitted = False
+        start_time = time.monotonic()
 
         try:
-            # Clean up any stale response file
-            if os.path.exists(response_file):
-                os.remove(response_file)
+            # Serialize independent MCP clients, including across processes.
+            # Never steal an active client's lock just because time elapsed.
+            for attempt in range(2):
+                try:
+                    with open(client_lock, "x", encoding="utf-8") as stream:
+                        json.dump({"id": request["id"], "pid": os.getpid()}, stream)
+                    acquired = True
+                    break
+                except FileExistsError:
+                    try:
+                        with open(client_lock, "r", encoding="utf-8") as stream:
+                            owner = json.load(stream)
+                        owner_pid = owner.get("pid")
+                        if isinstance(owner_pid, int) and not _pid_alive(owner_pid):
+                            _remove_owned_json(client_lock, owner.get("id"))
+                            continue
+                    except (OSError, ValueError, AttributeError):
+                        pass
+                    raise RenderDocBridgeError("RenderDoc mailbox is busy with another MCP client")
+            if not acquired:
+                raise RenderDocBridgeError("Could not acquire the RenderDoc mailbox")
+            if any(os.path.exists(path) for path in (request_file, active_file, lock_file)):
+                raise RenderDocBridgeError(
+                    "RenderDoc still has a queued or running request; wait for it to finish "
+                    "or acknowledge cancellation before retrying"
+                )
 
-            # Create lock file to signal we're writing
-            with open(lock_file, "w") as f:
-                f.write("lock")
+            # The legacy write lock is retained for older extensions. The
+            # request itself is published by rename, so no reader sees half JSON.
+            with open(lock_file, "x", encoding="utf-8") as stream:
+                json.dump({"id": request["id"]}, stream)
+            try:
+                _atomic_write_json(request_file, request)
+                submitted = True
+            finally:
+                _remove_owned_json(lock_file, request["id"])
 
-            # Write request
-            with open(request_file, "w", encoding="utf-8") as f:
-                json.dump(request, f)
-
-            # Remove lock file to signal write complete
-            os.remove(lock_file)
-
-            # Wait for response
-            start_time = time.time()
             while True:
-                if os.path.exists(response_file):
-                    # Small delay to ensure file is fully written
-                    time.sleep(0.01)
-
-                    with open(response_file, "r", encoding="utf-8") as f:
-                        response = json.load(f)
-
-                    os.remove(response_file)
-
-                    if response.get("id") != request["id"]:
-                        raise RenderDocBridgeError(
-                            "Mismatched response id (is another MCP client "
-                            "talking to the same RenderDoc instance?)"
-                        )
-
+                # New extensions use request-specific files. Older extensions
+                # still reply to response.json, which may be mid-write or belong
+                # to a previous/other client; never consume somebody else's reply.
+                for path in (own_response, response_file):
+                    try:
+                        with open(path, "r", encoding="utf-8") as stream:
+                            response = json.load(stream)
+                    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+                        continue
+                    if not isinstance(response, dict) or response.get("id") != request["id"]:
+                        continue
                     responder = response.get("pid")
                     if expect_pid is not None and responder not in (None, expect_pid):
                         raise RenderDocBridgeError(
-                            f"Response came from pid {responder}, expected "
-                            f"{expect_pid}"
+                            f"Response came from pid {responder}, expected {expect_pid}"
                         )
-
+                    _remove_owned_json(path, request["id"])
                     if "error" in response:
                         error = response["error"]
-                        raise RenderDocBridgeError(
-                            f"[{error['code']}] {error['message']}"
-                        )
-
+                        raise RenderDocBridgeError(f"[{error['code']}] {error['message']}")
                     return response.get("result")
 
-                # Check timeout
-                if time.time() - start_time > self.timeout:
+                if time.monotonic() - start_time >= self.timeout:
+                    # This is cooperative: an in-flight native replay call must
+                    # return before the extension can inspect the token.
+                    _atomic_write_json(cancel_file, {"id": request["id"]})
                     raise RenderDocBridgeError(
-                        "Request timed out"
+                        "Request timed out; cancellation requested"
                         + (
                             f" (target RenderDoc instance pid {expect_pid})"
                             if expect_pid is not None
-                            else " (legacy shared mailbox; is any RenderDoc "
-                            "instance with the MCP Bridge extension running?)"
+                            else " (legacy shared mailbox; older extensions may not support cancellation)"
                         )
                     )
-
-                # Poll interval
                 time.sleep(0.05)
-
         except RenderDocBridgeError:
             raise
-        except Exception as e:
-            raise RenderDocBridgeError(f"Communication error: {e}")
+        except Exception as exc:
+            if submitted:
+                try:
+                    _atomic_write_json(cancel_file, {"id": request["id"]})
+                except OSError:
+                    pass
+            raise RenderDocBridgeError(f"Communication error: {exc}")
+        finally:
+            if acquired:
+                _remove_owned_json(client_lock, request["id"])

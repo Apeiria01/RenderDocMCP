@@ -135,48 +135,103 @@ def get_frame_summary() -> dict:
 def find_draws_by_shader(
     shader_name: str,
     stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"] | None = None,
+    event_id_min: StrictInt | None = None,
+    event_id_max: StrictInt | None = None,
+    max_results: StrictInt = 1000,
+    max_events: StrictInt = 32,
+    time_budget_ms: StrictInt = 2000,
 ) -> dict:
     """
-    Find all draw calls using a shader with the given name (partial match).
+    Search shader names/entry points within an explicit event range.
 
-    Args:
-        shader_name: Partial name to search for in shader names or entry points
-        stage: Optional shader stage to search (if not specified, searches all stages)
-
-    Returns a list of matching draw calls with event IDs and match reasons.
+    Both event_id_min and event_id_max are required for this bounded replay
+    search. Upstream RenderDoc does not provide a portable shader usage index.
+    At most max_events (1-128, default 32) draw/dispatch events are checked.
+    time_budget_ms (1-10000) is cooperative between replay calls: an individual
+    GPU replay cannot be interrupted. The original UI-selected event is restored.
+    A partial response includes next_event_id; resume by passing it as
+    event_id_min with the original upper bound. Never interpret partial matches
+    as a complete result. max_results limits the returned page (1-10000).
     """
-    params: dict[str, object] = {"shader_name": shader_name}
-    if stage is not None:
-        params["stage"] = stage
-    return bridge.call("find_draws_by_shader", params)
+    return bridge.call("find_draws_by_shader", {
+        "shader_name": shader_name, "stage": stage,
+        "event_id_min": event_id_min, "event_id_max": event_id_max,
+        "max_results": max_results, "max_events": max_events,
+        "time_budget_ms": time_budget_ms,
+    })
 
 
 @mcp.tool
-def find_draws_by_texture(texture_name: str) -> dict:
+def find_draws_by_texture(
+    texture_name: str,
+    event_id_min: StrictInt | None = None,
+    event_id_max: StrictInt | None = None,
+    max_results: StrictInt = 1000,
+) -> dict:
     """
-    Find all draw calls using a texture with the given name (partial match).
+    Find texture uses in draw/dispatch events through the loaded usage index.
 
-    Args:
-        texture_name: Partial name to search for in texture resource names
-
-    Returns a list of matching draw calls with event IDs and match reasons.
-    Searches SRVs, UAVs, and render targets.
+    Matches a partial texture name. No per-event GPU replay is performed.
+    Index coverage is not proof of actual pixel access and may omit dynamic
+    bindless uses. Slot-level binding details require separate bounded inspection.
+    Optional event bounds filter results; max_results (1-10000) limits each page.
+    Resume a partial page with event_id_min=next_event_id. To include copies,
+    clears and resolves, resolve the resource ID and use find_resource_usage.
     """
-    return bridge.call("find_draws_by_texture", {"texture_name": texture_name})
+    return bridge.call("find_draws_by_texture", {
+        "texture_name": texture_name, "event_id_min": event_id_min,
+        "event_id_max": event_id_max, "max_results": max_results,
+    })
 
 
 @mcp.tool
-def find_draws_by_resource(resource_id: str) -> dict:
+def find_draws_by_resource(
+    resource_id: str,
+    event_id_min: StrictInt | None = None,
+    event_id_max: StrictInt | None = None,
+    max_results: StrictInt = 1000,
+    max_events: StrictInt = 32,
+    time_budget_ms: StrictInt = 2000,
+) -> dict:
     """
-    Find all draw calls using a specific resource ID (exact match).
+    Find draw/dispatch uses of a resource ID, e.g. ResourceId::12345 or 12345.
 
-    Args:
-        resource_id: Resource ID to search for (e.g. "ResourceId::12345" or "12345")
-
-    Returns a list of matching draw calls with event IDs and match reasons.
-    Searches shaders, SRVs, UAVs, render targets, and depth targets.
+    Textures and buffers use the standard loaded usage index plus output-target
+    metadata without replaying events. Its coverage may omit dynamic bindless
+    uses; it does not report every bound-but-unused descriptor or exact slots.
+    Shader IDs require both event bounds and use bounded replay instead of
+    nonstandard shader GetUsage support: max_events is 1-128, time_budget_ms
+    is 1-10000. max_results (1-10000) limits returned matches for either path.
+    Resume partial results using next_event_id as event_id_min. Use
+    find_resource_usage for copy/clear/resolve events of a texture or buffer.
     """
-    return bridge.call("find_draws_by_resource", {"resource_id": resource_id})
+    return bridge.call("find_draws_by_resource", {
+        "resource_id": resource_id, "event_id_min": event_id_min,
+        "event_id_max": event_id_max, "max_results": max_results,
+        "max_events": max_events, "time_budget_ms": time_budget_ms,
+    })
+
+
+@mcp.tool
+def find_resource_usage(
+    resource_id: str,
+    event_id_min: StrictInt | None = None,
+    event_id_max: StrictInt | None = None,
+    max_results: StrictInt = 1000,
+) -> dict:
+    """
+    List indexed texture/buffer uses, including draw, copy, clear and resolve.
+
+    Uses upstream GetUsage without seeking replay events; shader IDs are not
+    supported by this tool. Includes usage categories, with entries grouped by
+    event. max_results (1-10000) limits the page; optional event bounds filter it.
+    Resume partial results with event_id_min=next_event_id. Usage index coverage
+    may omit dynamic bindless uses and is not proof of per-pixel GPU access.
+    """
+    return bridge.call("find_resource_usage", {
+        "resource_id": resource_id, "event_id_min": event_id_min,
+        "event_id_max": event_id_max, "max_results": max_results,
+    })
 
 
 @mcp.tool

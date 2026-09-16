@@ -92,6 +92,86 @@ uv tool update-shell  # PATHに追加
 | `get_texture_data` | テクスチャのピクセルデータを取得 (Base64) |
 | `get_pipeline_state` | パイプライン状態を取得 |
 | `list_shader_hashes` | シェーダーバイトコードのCRC32 hashを一覧 |
+| `find_resource_usage` | Texture/buffer usage history including Copy/Clear/Resolve |
+
+## Resource search performance and portability (1.2)
+
+Texture/buffer reverse lookups use upstream `ReplayController.GetUsage` and
+`ActionDescription.outputs/depthOut` metadata. They do **not** call
+`SetFrameEvent` for every draw. Requests are scheduled with upstream
+`AsyncInvoke(callback)` after UI metadata has been copied, so the UI thread
+is free while the replay queue handles the search.
+
+```python
+# Draw/dispatch uses only; default path performs no per-event replay.
+find_draws_by_resource(resource_id="ResourceId::44880", max_results=1000)
+find_draws_by_texture(texture_name="UI", event_id_min=100000)
+
+# Full indexed history, including Copy/Clear/Resolve.
+find_resource_usage(resource_id="ResourceId::44880")
+
+# Shader objects have no portable upstream GetUsage support.
+# An explicit event range is required; each request is bounded.
+find_draws_by_shader(shader_name="main", stage="pixel",
+                     event_id_min=108000, event_id_max=108928,
+                     max_events=32, time_budget_ms=2000)
+```
+
+- `max_results`: 1–10000 (default 1000). Matches are grouped by event.
+- `partial=true` means the page or replay budget ended. Resume using
+  `event_id_min=next_event_id`, retaining the original upper bound.
+  `total_matches` counts this page; it is not an estimate of unvisited events.
+- Shader name/ID searches require both event bounds. `max_events` is 1–128,
+  default 32; `time_budget_ms` is 1–10000, default 2000. These searches restore
+  the UI-selected event. Time and cancellation limits are cooperative between
+  calls; an already-running GPU replay or final restoration cannot be aborted.
+- Usage indexes can omit dynamic/bindless descriptor ranges. Their results
+  describe recorded uses, not every bound-but-unused descriptor or proof of
+  per-pixel GPU access. `coverage` reports these limits; `(0, Unused)` is
+  reported as an untracked resource, never as a real event 0. Exact descriptor
+  slots require inspecting an individual event.
+- `find_draws_by_resource` accepts shader IDs only via bounded replay. The new
+  code never calls `GetUsage(shader_id)`, including on forks that implement it.
+  PSO/root-signature and other non-texture/buffer IDs are not passed to GetUsage.
+- API provenance was checked against upstream RenderDoc v1.39. No custom
+  RenderDoc core APIs were added or required. In particular, the local fork's
+  shader usage indexing is not used. Other pre-existing tools are outside this
+  search change.
+
+### Transport behavior
+
+Requests/responses are published atomically. New clients use per-request
+response files and a mailbox lock; the server still accepts legacy clients,
+and the client can read legacy `response.json` replies. Timed-out requests get
+an ID-specific cancellation marker; an in-flight request is not overwritten by
+another client. A cancelled search stops at its next cancellation check.
+
+A live or uncheckable process is retained even when its heartbeat is stale.
+Only confirmed dead processes are pruned. Asynchronous searches leave UI
+heartbeats running; unrelated existing synchronous tools retain their prior
+execution model. Updating both server and extension is necessary for cooperative
+cancellation and per-request transport behavior. New clients require the safe-search
+capability before sending any reverse lookup to an instance; an older extension
+is rejected with reload instructions instead of running its unbounded search.
+Compatibility with legacy replies is retained for other tools, but an old
+extension cannot honor the new cancellation protocol.
+
+### Update and validate
+
+```powershell
+.venv/Scripts/python.exe -m unittest discover -s tests -v
+.venv/Scripts/python.exe scripts/install_extension.py
+```
+
+Restart the MCP client connection to refresh tool schemas. For an already-open
+RenderDoc capture, reload the installed extension in its Python Shell:
+
+```python
+pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")
+```
+
+This uses upstream extension reload and does not require closing the capture.
+Existing in-memory code is not replaced merely by copying files to disk.
 
 ## 使用例
 
@@ -184,7 +264,7 @@ get_buffer_contents(resource_id="ResourceId::123", offset=256, length=512)
 - [uv](https://docs.astral.sh/uv/)
 - RenderDoc 1.20+
 
-> **Note**: 動作確認はWindows + DirectX 11環境でのみ行っています。
+> **Note**: 既存ツールはWindows + DirectX 11で動作確認済み。1.2の索引検索と非同期経路はWindows + DirectX 12の実キャプチャでも検証しました。
 > Linux/macOS + Vulkan/OpenGL環境でも動作する可能性がありますが、未検証です。
 
 ## ライセンス

@@ -49,6 +49,7 @@ RenderDocMCP/
 | `find_draws_by_shader` | シェーダー名でドローコールを逆引き検索 |
 | `find_draws_by_texture` | テクスチャ名でドローコールを逆引き検索 |
 | `find_draws_by_resource` | リソースIDでドローコールを逆引き検索 |
+| `find_resource_usage` | Texture/buffer の Copy/Clear/Resolve を含む使用履歴 |
 | `get_draw_call_details` | 特定ドローコールの詳細 |
 | `get_action_timings` | アクションのGPU実行時間を取得 |
 | `get_shader_info` | シェーダーソース/定数バッファ |
@@ -88,7 +89,8 @@ open_capture(capture_path="D:\\captures\\game.rdc")
 
 ```python
 # シェーダー名で検索（部分一致）
-find_draws_by_shader(shader_name="Toon", stage="pixel")
+find_draws_by_shader(shader_name="Toon", stage="pixel",
+                     event_id_min=100, event_id_max=500, max_events=32)
 
 # テクスチャ名で検索（部分一致）
 find_draws_by_texture(texture_name="CharacterSkin")
@@ -127,7 +129,8 @@ get_action_timings(marker_filter="Camera.Render", exclude_markers=["GUI.Repaint"
 
 - RenderDoc内蔵Pythonにはsocket/QtNetworkモジュールがないため、ファイルベースIPCを採用
 - RenderDoc拡張機能はPython 3.6標準ライブラリのみ使用
-- ReplayControllerへのアクセスは`BlockInvoke`経由で行う
+- ReplayControllerへのアクセスは公式の replay queue 経由で行う。検索は UI メタデータをスナップショットして `AsyncInvoke(callback)`、既存の単発読み出しは `BlockInvoke`。
+- Texture/buffer 逆引きは上流の `GetUsage` と action metadata を使い、全 draw の `SetFrameEvent` 走査は禁止。Shader の `GetUsage` は改造版固有なので使わず、明示範囲・件数・時間上限付きの検索にする。
 
 ## 参考リンク
 

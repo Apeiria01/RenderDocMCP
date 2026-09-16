@@ -5,6 +5,8 @@ Routes incoming requests to appropriate facade methods.
 
 import traceback
 
+from .request_control import RequestCancelled
+
 
 class RequestHandler:
     """Handles incoming MCP bridge requests"""
@@ -20,6 +22,7 @@ class RequestHandler:
             "find_draws_by_shader": self._handle_find_draws_by_shader,
             "find_draws_by_texture": self._handle_find_draws_by_texture,
             "find_draws_by_resource": self._handle_find_draws_by_resource,
+            "find_resource_usage": self._handle_find_resource_usage,
             "get_draw_call_details": self._handle_get_draw_call_details,
             "get_action_timings": self._handle_get_action_timings,
             "get_shader_info": self._handle_get_shader_info,
@@ -53,6 +56,66 @@ class RequestHandler:
         except Exception as e:
             traceback.print_exc()
             return self._error_response(request_id, -32000, str(e))
+
+    _SEARCH_METHODS = frozenset((
+        "find_draws_by_shader", "find_draws_by_texture",
+        "find_draws_by_resource", "find_resource_usage",
+    ))
+
+    def handle_async(self, request, complete, control=None):
+        """Return True when a search owns the asynchronous response callback."""
+        method = request.get("method")
+        if method not in self._SEARCH_METHODS:
+            return False
+        request_id = request.get("id")
+
+        def finished(result, error):
+            if error is None:
+                response = {"id": request_id, "result": result}
+            else:
+                # Cancellation is cooperative between RenderDoc API calls.
+                if isinstance(error, RequestCancelled):
+                    code = -32800
+                elif isinstance(error, (ValueError, TypeError)):
+                    code = -32602
+                else:
+                    code = -32000
+                response = self._error_response(request_id, code, str(error))
+            complete(response)
+
+        try:
+            self.facade.search_async(
+                lambda service: self._dispatch_search(
+                    method, request.get("params", {}), service
+                ),
+                finished, request_control=control,
+            )
+        except Exception as exc:
+            finished(None, exc)
+        return True
+
+    def _dispatch_search(self, method, params, target=None):
+        target = target if target is not None else self.facade
+        parameter = {
+            "find_draws_by_shader": "shader_name",
+            "find_draws_by_texture": "texture_name",
+            "find_draws_by_resource": "resource_id",
+            "find_resource_usage": "resource_id",
+        }[method]
+        value = params.get(parameter)
+        if value is None:
+            raise ValueError("%s is required" % parameter)
+        options = {
+            "event_id_min": params.get("event_id_min"),
+            "event_id_max": params.get("event_id_max"),
+            "max_results": params.get("max_results", 1000),
+        }
+        if method in ("find_draws_by_shader", "find_draws_by_resource"):
+            options["max_events"] = params.get("max_events", 32)
+            options["time_budget_ms"] = params.get("time_budget_ms", 2000)
+        if method == "find_draws_by_shader":
+            options["stage"] = params.get("stage")
+        return getattr(target, method)(value, **options)
 
     def _error_response(self, request_id, code, message):
         """Create an error response"""
@@ -99,26 +162,16 @@ class RequestHandler:
         return self.facade.get_frame_summary()
 
     def _handle_find_draws_by_shader(self, params):
-        """Handle find_draws_by_shader request"""
-        shader_name = params.get("shader_name")
-        if shader_name is None:
-            raise ValueError("shader_name is required")
-        stage = params.get("stage")
-        return self.facade.find_draws_by_shader(shader_name, stage)
+        return self._dispatch_search("find_draws_by_shader", params)
 
     def _handle_find_draws_by_texture(self, params):
-        """Handle find_draws_by_texture request"""
-        texture_name = params.get("texture_name")
-        if texture_name is None:
-            raise ValueError("texture_name is required")
-        return self.facade.find_draws_by_texture(texture_name)
+        return self._dispatch_search("find_draws_by_texture", params)
 
     def _handle_find_draws_by_resource(self, params):
-        """Handle find_draws_by_resource request"""
-        resource_id = params.get("resource_id")
-        if resource_id is None:
-            raise ValueError("resource_id is required")
-        return self.facade.find_draws_by_resource(resource_id)
+        return self._dispatch_search("find_draws_by_resource", params)
+
+    def _handle_find_resource_usage(self, params):
+        return self._dispatch_search("find_resource_usage", params)
 
     def _handle_get_draw_call_details(self, params):
         """Handle get_draw_call_details request"""

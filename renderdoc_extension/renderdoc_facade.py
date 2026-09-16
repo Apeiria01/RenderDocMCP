@@ -1,7 +1,7 @@
 """
 RenderDoc API Facade
 Provides thread-safe access to RenderDoc's ReplayController and CaptureContext.
-Uses BlockInvoke to marshal calls to the replay thread.
+Searches use AsyncInvoke; existing bounded reads use BlockInvoke.
 """
 
 from .services import (
@@ -11,6 +11,29 @@ from .services import (
     ResourceService,
     PipelineService,
 )
+
+
+class _SearchContextSnapshot:
+    """Capture UI-owned metadata before scheduling replay work."""
+
+    def __init__(self, ctx, request_control=None):
+        self._loaded = ctx.IsCaptureLoaded()
+        if not self._loaded:
+            raise ValueError("No capture loaded")
+        self._event_id = int(ctx.CurEvent())
+        self.resource_names = {}
+        for index, resource in enumerate(ctx.GetResources()):
+            if request_control is not None and index % 256 == 0:
+                request_control.check_cancelled()
+            self.resource_names[str(resource.resourceId)] = str(
+                ctx.GetResourceName(resource.resourceId)
+            )
+
+    def IsCaptureLoaded(self):
+        return self._loaded
+
+    def CurEvent(self):
+        return self._event_id
 
 
 class RenderDocFacade:
@@ -121,17 +144,47 @@ class RenderDocFacade:
 
     # ==================== Search Operations ====================
 
-    def find_draws_by_shader(self, shader_name, stage=None):
-        """Find all draw calls using a shader with the given name (partial match)"""
-        return self._search.find_draws_by_shader(shader_name, stage)
+    def search_async(self, search_fn, complete, request_control=None):
+        """Snapshot on UI, then run a request on the official replay queue.
 
-    def find_draws_by_texture(self, texture_name):
-        """Find all draw calls using a texture with the given name (partial match)"""
-        return self._search.find_draws_by_texture(texture_name)
+        complete(result, error) runs on the replay thread and must not touch UI.
+        Each request owns its service, context snapshot and cancellation token.
+        """
+        snapshot = _SearchContextSnapshot(self.ctx, request_control)
 
-    def find_draws_by_resource(self, resource_id):
-        """Find all draw calls using a specific resource ID (exact match)"""
-        return self._search.find_draws_by_resource(resource_id)
+        def replay_work(controller):
+            try:
+                if request_control is not None:
+                    request_control.check_cancelled()
+                service = SearchService(
+                    snapshot, lambda callback: callback(controller),
+                    request_control=request_control,
+                )
+                result = search_fn(service)
+            except Exception as exc:
+                complete(None, exc)
+            else:
+                complete(result, None)
+
+        # Single-argument form is shared by upstream RenderDoc versions;
+        # optional tag argument ordering has changed between releases.
+        self.ctx.Replay().AsyncInvoke(replay_work)
+
+    def find_draws_by_shader(self, shader_name, stage=None, **options):
+        """Search shaders only within an explicitly bounded replay range."""
+        return self._search.find_draws_by_shader(shader_name, stage, **options)
+
+    def find_draws_by_texture(self, texture_name, **options):
+        """Search texture usage without seeking replay events."""
+        return self._search.find_draws_by_texture(texture_name, **options)
+
+    def find_draws_by_resource(self, resource_id, **options):
+        """Use the texture/buffer index, or bounded replay for a shader."""
+        return self._search.find_draws_by_resource(resource_id, **options)
+
+    def find_resource_usage(self, resource_id, **options):
+        """Include copy, clear and resolve events from the standard usage index."""
+        return self._search.find_resource_usage(resource_id, **options)
 
     # ==================== Resource Operations ====================
 
