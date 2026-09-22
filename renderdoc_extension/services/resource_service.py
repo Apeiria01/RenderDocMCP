@@ -6,7 +6,7 @@ import base64
 
 import renderdoc as rd
 
-from ..utils import Parsers
+from ..utils import Parsers, Helpers
 
 
 class ResourceService:
@@ -28,10 +28,8 @@ class ResourceService:
 
     @staticmethod
     def _validate_event_id(event_id):
-        if event_id is not None and (
-            isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0
-        ):
-            raise ValueError("event_id must be a positive integer")
+        if event_id is not None:
+            Helpers.validate_event_id(event_id)
 
     @staticmethod
     def _validate_byte_range(offset, length):
@@ -45,18 +43,7 @@ class ResourceService:
         if event_id is None:
             return
 
-        # Include API events between actions, not just draw/dispatch event IDs.
-        pending = list(controller.GetRootActions())
-        while pending:
-            action = pending.pop()
-            if action.eventId == event_id or any(
-                event.eventId == event_id for event in action.events
-            ):
-                # Reuse the current state when reading several resources at one event.
-                controller.SetFrameEvent(event_id, False)
-                return
-            pending.extend(action.children)
-        raise ValueError("Event not found in capture: %d" % event_id)
+        Helpers.select_event(controller, event_id)
 
     def get_buffer_contents(self, resource_id, offset=0, length=0, event_id=None):
         """Read buffer bytes, optionally immediately after a specific event."""

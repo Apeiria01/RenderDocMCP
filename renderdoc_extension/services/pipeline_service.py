@@ -7,6 +7,8 @@ import zlib
 import renderdoc as rd
 
 from ..utils import Parsers, Serializers, Helpers
+from ..utils.output_merger import serialize_output_merger
+from ..utils.inspection import access_binding, constant_buffers, format_info, sampler_info
 
 
 class PipelineService:
@@ -21,13 +23,20 @@ class PipelineService:
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
+        Helpers.validate_event_id(event_id)
+        if not isinstance(stage, str):
+            raise ValueError("stage must be a shader stage string")
+        stage_enum = Parsers.parse_stage(stage)
         result = {"shader": None, "error": None}
 
         def callback(controller):
-            controller.SetFrameEvent(event_id, True)
+            try:
+                Helpers.select_event(controller, event_id)
+            except Exception as exc:
+                result["error"] = str(exc)
+                return
 
             pipe = controller.GetPipelineState()
-            stage_enum = Parsers.parse_stage(stage)
 
             shader = pipe.GetShader(stage_enum)
             if shader == rd.ResourceId.Null():
@@ -73,15 +82,43 @@ class PipelineService:
             raise ValueError(result["error"])
         return result["shader"]
 
+    def get_output_merger_state(self, event_id):
+        """Return OM state immediately after an action or API event."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+        Helpers.validate_event_id(event_id)
+        result = {"data": None, "error": None}
+
+        def callback(controller):
+            try:
+                Helpers.select_event(controller, event_id)
+                api = controller.GetAPIProperties().pipelineType
+                result["data"] = {
+                    "event_id": event_id, "api": str(api),
+                    "output_merger": serialize_output_merger(controller, api),
+                }
+            except Exception as exc:
+                result["error"] = str(exc)
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["data"]
+
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
+        Helpers.validate_event_id(event_id)
         result = {"pipeline": None, "error": None}
 
         def callback(controller):
-            controller.SetFrameEvent(event_id, True)
+            try:
+                Helpers.select_event(controller, event_id)
+            except Exception as exc:
+                result["error"] = str(exc)
+                return
 
             pipe = controller.GetPipelineState()
             api = controller.GetAPIProperties().pipelineType
@@ -187,6 +224,12 @@ class PipelineService:
                     pipeline_info["depth_target"] = str(depth.resource)
             except Exception as e:
                 pipeline_info["render_targets_error"] = str(e)
+
+            # Share the same event and serializer as the focused OM query.
+            try:
+                pipeline_info["output_merger"] = serialize_output_merger(controller, api)
+            except Exception as exc:
+                pipeline_info["output_merger_error"] = str(exc)
 
             # Input assembly: topology, vertex buffers, input layout, index buffer.
             # Each sub-block is guarded independently so a wrong API name in a
@@ -537,32 +580,27 @@ class PipelineService:
         resources = []
         try:
             srvs = pipe.GetReadOnlyResources(stage, False)
-
-            name_map = {}
-            if reflection:
-                for res in reflection.readOnlyResources:
-                    name_map[res.fixedBindNumber] = res.name
-
+            bindings = reflection.readOnlyResources if reflection else []
             for srv in srvs:
                 if srv.descriptor.resource == rd.ResourceId.Null():
                     continue
-
-                slot = srv.access.index
-                res_info = {
-                    "slot": slot,
-                    "name": name_map.get(slot, ""),
-                    "resource_id": str(srv.descriptor.resource),
-                }
-
-                res_info.update(
-                    self._get_resource_details(controller, srv.descriptor.resource)
-                )
-
-                res_info["first_mip"] = srv.descriptor.firstMip
-                res_info["num_mips"] = srv.descriptor.numMips
-                res_info["first_slice"] = srv.descriptor.firstSlice
-                res_info["num_slices"] = srv.descriptor.numSlices
-
+                res_info = access_binding(srv, bindings)
+                desc = srv.descriptor
+                res_info["resource_id"] = str(desc.resource)
+                res_info.update(self._get_resource_details(controller, desc.resource))
+                # Keep legacy format as storage format; view_format is authoritative for sampling.
+                res_info["resource_format"] = res_info.get("format")
+                res_info["view_format"] = format_info(desc.format)
+                res_info["view_id"] = str(desc.view)
+                res_info["descriptor_type"] = str(desc.type)
+                res_info["descriptor_flags"] = str(desc.flags)
+                res_info["byte_offset"] = int(desc.byteOffset)
+                res_info["byte_size"] = int(desc.byteSize)
+                res_info["element_byte_size"] = int(desc.elementByteSize)
+                res_info["first_mip"] = int(desc.firstMip)
+                res_info["num_mips"] = int(desc.numMips)
+                res_info["first_slice"] = int(desc.firstSlice)
+                res_info["num_slices"] = int(desc.numSlices)
                 resources.append(res_info)
         except Exception as e:
             resources.append({"error": str(e)})
@@ -609,60 +647,9 @@ class PipelineService:
         samplers = []
         try:
             sampler_list = pipe.GetSamplers(stage, False)
-
-            name_map = {}
-            if reflection:
-                for samp in reflection.samplers:
-                    name_map[samp.fixedBindNumber] = samp.name
-
+            bindings = reflection.samplers if reflection else []
             for samp in sampler_list:
-                slot = samp.access.index
-                samp_info = {
-                    "slot": slot,
-                    "name": name_map.get(slot, ""),
-                }
-
-                desc = samp.descriptor
-                try:
-                    samp_info["address_u"] = str(desc.addressU)
-                    samp_info["address_v"] = str(desc.addressV)
-                    samp_info["address_w"] = str(desc.addressW)
-                except AttributeError:
-                    pass
-
-                try:
-                    samp_info["filter"] = str(desc.filter)
-                except AttributeError:
-                    pass
-
-                try:
-                    samp_info["max_anisotropy"] = desc.maxAnisotropy
-                except AttributeError:
-                    pass
-
-                try:
-                    samp_info["min_lod"] = desc.minLOD
-                    samp_info["max_lod"] = desc.maxLOD
-                    samp_info["mip_lod_bias"] = desc.mipLODBias
-                except AttributeError:
-                    pass
-
-                try:
-                    samp_info["border_color"] = [
-                        desc.borderColor[0],
-                        desc.borderColor[1],
-                        desc.borderColor[2],
-                        desc.borderColor[3],
-                    ]
-                except (AttributeError, TypeError):
-                    pass
-
-                try:
-                    samp_info["compare_function"] = str(desc.compareFunction)
-                except AttributeError:
-                    pass
-
-                samplers.append(samp_info)
+                samplers.append(sampler_info(samp, bindings))
         except Exception as e:
             samplers.append({"error": str(e)})
 
@@ -731,39 +718,8 @@ class PipelineService:
         return details
 
     def _get_cbuffer_info(self, controller, pipe, reflection, stage):
-        """Get constant buffer information and values"""
-        cbuffers = []
-
-        for i, cb in enumerate(reflection.constantBlocks):
-            cb_info = {
-                "name": cb.name,
-                "slot": i,
-                "size": cb.byteSize,
-                "variables": [],
-            }
-
-            try:
-                # GetConstantBuffer was removed; the unified API returns a
-                # UsedDescriptor whose `.descriptor` carries the bound buffer.
-                bind = pipe.GetConstantBlock(stage, i, 0)
-                if bind.descriptor.resource != rd.ResourceId.Null():
-                    variables = controller.GetCBufferVariableContents(
-                        pipe.GetGraphicsPipelineObject(),
-                        reflection.resourceId,
-                        stage,
-                        reflection.entryPoint,
-                        i,
-                        bind.descriptor.resource,
-                        bind.descriptor.byteOffset,
-                        bind.descriptor.byteSize,
-                    )
-                    cb_info["variables"] = Serializers.serialize_variables(variables)
-            except Exception as e:
-                cb_info["error"] = str(e)
-
-            cbuffers.append(cb_info)
-
-        return cbuffers
+        """Use the same bounded value/raw fallback contract as the dedicated tool."""
+        return constant_buffers(controller, pipe, reflection, stage)["constant_buffers"]
 
     def _get_resource_bindings(self, reflection):
         """Get shader resource bindings"""

@@ -52,7 +52,10 @@ RenderDocMCP/
 | `find_resource_usage` | Texture/buffer の Copy/Clear/Resolve を含む使用履歴 |
 | `get_draw_call_details` | 特定ドローコールの詳細 |
 | `get_action_timings` | アクションのGPU実行時間を取得 |
-| `get_shader_info` | シェーダーソース/定数バッファ |
+| `get_shader_info` | シェーダーソース/定数バッファ実値（有界） |
+| `get_bridge_info` | 読み込み済み拡張の inspection revision と module path |
+| `get_constant_buffers` | 単一イベントの定数実値/root constants と有界 raw bytes |
+| `get_postvs_data` | 単一 draw/instance/view の MeshFormat と有界 PostVS bytes |
 | `get_buffer_contents` | バッファデータ取得（オフセット/長さ指定可） |
 | `get_texture_info` | テクスチャメタデータ |
 | `get_texture_data` | テクスチャピクセルデータ取得（mip/slice/3Dスライス対応） |
@@ -129,6 +132,9 @@ get_action_timings(marker_filter="Camera.Render", exclude_markers=["GUI.Repaint"
 
 - RenderDoc内蔵Pythonにはsocket/QtNetworkモジュールがないため、ファイルベースIPCを採用
 - RenderDoc拡張機能はPython 3.6標準ライブラリのみ使用
+- CB/PostVS は単一イベントの `BlockInvoke` 内で取得し、整数を暗黙変換しない。raw read の length=0（全体取得）は禁止、共有上限は最大8 MiB。root constants の null resource をスキップせず公式 API で照会し、値取得失敗は明示する。
+- SRV の storage format と descriptor view format を分離する。`access.index` は reflection index、sampler は `UsedDescriptor.sampler`。PostVS を world-space と称さない。
+- ライブ更新は既存 source/installed ファイルと SHA-256 をバックアップし、変更ファイルのみ配置する。公式 `pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")` を各 Python Shell で実行する。`sys.modules` 操作や capture の再起動は不要。`get_bridge_info` で実際に読み込まれた revision を確認する。
 - ReplayControllerへのアクセスは公式の replay queue 経由で行う。検索は UI メタデータをスナップショットして `AsyncInvoke(callback)`、既存の単発読み出しは `BlockInvoke`。
 - Texture/buffer 逆引きは上流の `GetUsage` と action metadata を使い、全 draw の `SetFrameEvent` 走査は禁止。Shader の `GetUsage` は改造版固有なので使わず、明示範囲・件数・時間上限付きの検索にする。
 

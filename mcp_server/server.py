@@ -282,8 +282,63 @@ def get_action_timings(
 
 
 @mcp.tool
+def get_bridge_info() -> dict:
+    """Read the loaded extension's inspection revision and module path (not disk version)."""
+    return bridge.call("get_bridge_info", {})
+
+
+@mcp.tool
+def get_constant_buffers(
+    event_id: StrictInt,
+    stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"],
+    block_index: StrictInt | None = None,
+    array_element: StrictInt = 0,
+    max_bytes: StrictInt = 1048576,
+) -> dict:
+    """Read actual constant values and bounded raw bytes at one exact event.
+
+    block_index is the reflection index, NOT a register. Omit for all blocks
+    (up to 128), one array_element per block. An element > 0 requires block_index.
+    max_bytes is a shared reflection-byte budget, 1..8 MiB; no length=0 reads.
+    Binding resource/offset/size and completeness are explicit. Null-resource
+    root/push constants are queried via GetCBufferVariableContents, not skipped.
+    Nonfinite floats use NaN/+Infinity/-Infinity strings with raw value bits.
+    Replay remains at event_id; the GUI selection is not changed. No capture writes.
+    """
+    return bridge.call("get_constant_buffers", {
+        "event_id": event_id, "stage": stage, "block_index": block_index,
+        "array_element": array_element, "max_bytes": max_bytes,
+    })
+
+
+@mcp.tool
+def get_postvs_data(
+    event_id: StrictInt,
+    instance: StrictInt = 0,
+    view: StrictInt = 0,
+    stage: Literal["vsout", "gsout"] = "vsout",
+    max_bytes: StrictInt = 8388608,
+) -> dict:
+    """Read post-transform buffers for ONE draw/instance/view (never scan draws).
+
+    Returns actual MeshFormat metadata and base64 index/vertex ranges, capped
+    at max_bytes (1..8 MiB total). instance is zero-based, not instanceOffset.
+    Indices, baseVertex and restart determine the vertex interval. Short reads,
+    unavailable APIs and budget limits are explicit; no partial indices are used.
+    This is shader output (often clip/post-projection), NOT world-space geometry.
+    No unprojection, capture writes or resource replacement is performed.
+    Replay remains at event_id; GUI selection is not changed. Driver/runtime
+    limitations may return supported=false or complete=false with reason.
+    """
+    return bridge.call("get_postvs_data", {
+        "event_id": event_id, "instance": instance, "view": view,
+        "stage": stage, "max_bytes": max_bytes,
+    })
+
+
+@mcp.tool
 def get_shader_info(
-    event_id: int,
+    event_id: StrictInt,
     stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"],
 ) -> dict:
     """
@@ -375,7 +430,33 @@ def get_texture_data(
 
 
 @mcp.tool
-def get_pipeline_state(event_id: int) -> dict:
+def get_output_merger_state(event_id: StrictInt) -> dict:
+    """
+    Get D3D11/D3D12 output-merger state immediately after an event.
+
+    Accepts a positive draw/action OR API state-setting event ID. Selection and
+    snapshot happen atomically on the replay thread; the UI selection is not
+    changed, and the replay controller remains at the requested event, matching
+    get_texture_data(event_id=...) semantics.
+
+    Returns DSV/RTV resource and view IDs, formats, mip/slice ranges and texture
+    metadata; depth test/write/function/read-only flags; front/back stencil;
+    per-target color/alpha blending, logic operations, color masks, blend factor,
+    alpha-to-coverage and sample mask. Unbound DSV is null; RTV slots are retained.
+    Blend targets are raw entries; effective state is targets[effective_blend_slot].
+    UAVs report all bound D3D11 pixel slots or D3D12 shader accesses with register
+    mapping and explicit scope; descriptor-query failures appear as uavs_error.
+    depth_write_allowed is state eligibility, NOT proof of actual pixel writes.
+    Other APIs return output_merger.supported=false with a reason.
+
+    For depth pixels, pass depth_target.resource_id, first_mip and first_slice to
+    get_texture_data with the SAME event_id (choose an MSAA sample explicitly).
+    """
+    return bridge.call("get_output_merger_state", {"event_id": event_id})
+
+
+@mcp.tool
+def get_pipeline_state(event_id: StrictInt) -> dict:
     """
     Get the full graphics pipeline state at a specific event.
 
@@ -389,6 +470,7 @@ def get_pipeline_state(event_id: int) -> dict:
     - Samplers: addressing modes, filter settings, LOD parameters
     - Constant buffers: slot, size, variable count
     - Render targets and depth target
+    - D3D11/D3D12 output_merger: DSV/RTVs, depth/stencil and blending
     - Viewports and input assembly state
     """
     return bridge.call("get_pipeline_state", {"event_id": event_id})

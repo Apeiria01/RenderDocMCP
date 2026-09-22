@@ -2,6 +2,9 @@
 Serialization utility functions for RenderDoc data types.
 """
 
+import math
+import struct
+
 import renderdoc as rd
 
 
@@ -50,23 +53,53 @@ class Serializers:
                 "columns": var.columns,
             }
 
-            # Get value based on type
-            try:
-                if var.type == rd.VarType.Float:
-                    count = var.rows * var.columns
-                    var_info["value"] = list(var.value.f32v[:count])
-                elif var.type == rd.VarType.Int:
-                    count = var.rows * var.columns
-                    var_info["value"] = list(var.value.s32v[:count])
-                elif var.type == rd.VarType.UInt:
-                    count = var.rows * var.columns
-                    var_info["value"] = list(var.value.u32v[:count])
-            except Exception:
-                pass
-
-            # Nested members
             if var.members:
                 var_info["members"] = Serializers.serialize_variables(var.members)
+            else:
+                try:
+                    count = int(var.rows) * int(var.columns)
+                    if not 1 <= count <= 16:
+                        raise ValueError("Invalid scalar/vector/matrix component count: %d" % count)
+                    formats = (
+                        ("Float", "f32v", float, "u32v"),
+                        ("Double", "f64v", float, "u64v"),
+                        ("Half", "u16v", int, "u16v"),
+                        ("SInt", "s32v", int, None), ("Int", "s32v", int, None),
+                        ("UInt", "u32v", int, None), ("Bool", "u32v", int, None),
+                        ("SLong", "s64v", int, None), ("ULong", "u64v", int, None),
+                        ("SShort", "s16v", int, None), ("UShort", "u16v", int, None),
+                        ("SByte", "s8v", int, None), ("UByte", "u8v", int, None),
+                    )
+                    matched = False
+                    for name, field, cast, bits_field in formats:
+                        enum_value = getattr(rd.VarType, name, None)
+                        if enum_value is None or var.type != enum_value:
+                            continue
+                        matched = True
+                        array = getattr(var.value, field)
+                        # SWIG fixed arrays need integer indexing, not Python slices.
+                        values = [cast(array[i]) for i in range(count)]
+                        if name == "Half":
+                            values = [struct.unpack("<e", struct.pack("<H", v))[0] for v in values]
+                        if bits_field:
+                            try:
+                                bits = getattr(var.value, bits_field)
+                                var_info["value_bits"] = [int(bits[i]) for i in range(count)]
+                                var_info["value_bits_storage"] = bits_field
+                            except Exception as exc:
+                                var_info["value_bits_error"] = str(exc)
+                        var_info["value"] = [
+                            ("NaN" if math.isnan(v) else ("+Infinity" if v > 0 else "-Infinity"))
+                            if isinstance(v, float) and not math.isfinite(v) else v
+                            for v in values
+                        ]
+                        if int(var.rows) > 1:
+                            var_info["value_order"] = "row-major (RenderDoc decoded ShaderVariable)"
+                        break
+                    if not matched:
+                        raise ValueError("Unsupported ShaderVariable type: %s" % var.type)
+                except Exception as exc:
+                    var_info["value_error"] = str(exc)
 
             result.append(var_info)
 

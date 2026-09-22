@@ -26,10 +26,14 @@ class RequestHandler:
             "get_draw_call_details": self._handle_get_draw_call_details,
             "get_action_timings": self._handle_get_action_timings,
             "get_shader_info": self._handle_get_shader_info,
+            "get_bridge_info": self._handle_get_bridge_info,
+            "get_constant_buffers": self._handle_get_constant_buffers,
+            "get_postvs_data": self._handle_get_postvs_data,
             "get_buffer_contents": self._handle_get_buffer_contents,
             "get_texture_info": self._handle_get_texture_info,
             "get_texture_data": self._handle_get_texture_data,
             "get_pipeline_state": self._handle_get_pipeline_state,
+            "get_output_merger_state": self._handle_get_output_merger_state,
             "list_set_render_targets": self._handle_list_set_render_targets,
             "list_shader_hashes": self._handle_list_shader_hashes,
             "list_captures": self._handle_list_captures,
@@ -199,7 +203,25 @@ class RequestHandler:
             raise ValueError("event_id is required")
         if stage is None:
             raise ValueError("stage is required")
-        return self.facade.get_shader_info(int(event_id), stage)
+        return self.facade.get_shader_info(event_id, stage)
+
+    def _handle_get_bridge_info(self, params):
+        return self.facade.get_bridge_info()
+
+    def _handle_get_constant_buffers(self, params):
+        return self.facade.get_constant_buffers(
+            params.get("event_id"), params.get("stage"),
+            block_index=params.get("block_index"),
+            array_element=params.get("array_element", 0),
+            max_bytes=params.get("max_bytes", 1048576),
+        )
+
+    def _handle_get_postvs_data(self, params):
+        return self.facade.get_postvs_data(
+            params.get("event_id"), instance=params.get("instance", 0),
+            view=params.get("view", 0), stage=params.get("stage", "vsout"),
+            max_bytes=params.get("max_bytes", 8388608),
+        )
 
     def _handle_get_buffer_contents(self, params):
         """Handle get_buffer_contents request"""
@@ -233,12 +255,16 @@ class RequestHandler:
             event_id=params.get("event_id"),
         )
 
+    def _handle_get_output_merger_state(self, params):
+        """Do not coerce event IDs; service validates type and capture membership."""
+        return self.facade.get_output_merger_state(params.get("event_id"))
+
     def _handle_get_pipeline_state(self, params):
         """Handle get_pipeline_state request"""
         event_id = params.get("event_id")
         if event_id is None:
             raise ValueError("event_id is required")
-        return self.facade.get_pipeline_state(int(event_id))
+        return self.facade.get_pipeline_state(event_id)
 
     def _handle_list_set_render_targets(self, params):
         """Handle list_set_render_targets request"""

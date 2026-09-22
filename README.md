@@ -91,6 +91,7 @@ uv tool update-shell  # PATHに追加
 | `get_texture_info` | テクスチャのメタデータを取得 |
 | `get_texture_data` | テクスチャのピクセルデータを取得 (Base64) |
 | `get_pipeline_state` | パイプライン状態を取得 |
+| `get_output_merger_state` | 指定イベントのDSV/RTV・深度/ステンシル・ブレンド・UAV状態を取得 |
 | `list_shader_hashes` | シェーダーバイトコードのCRC32 hashを一覧 |
 | `find_resource_usage` | Texture/buffer usage history including Copy/Clear/Resolve |
 
@@ -270,3 +271,138 @@ get_buffer_contents(resource_id="ResourceId::123", offset=256, length=512)
 ## ライセンス
 
 MIT
+
+
+## Output-merger state at a specific event
+
+Use the focused query for a D3D11/D3D12 draw or an API state-setting event:
+
+```python
+snapshot = get_output_merger_state(event_id=677)
+om = snapshot["output_merger"]
+depth_state = om["depth_stencil"]
+dsv = om["depth_target"]
+blend = om["blend"]
+
+# Read depth pixels immediately after the SAME event.
+# Select each required slice and MSAA sample explicitly.
+if dsv is not None:
+    pixels = get_texture_data(
+        event_id=snapshot["event_id"],
+        resource_id=dsv["resource_id"],
+        mip=dsv["first_mip"],
+        slice=dsv["first_slice"],
+        sample=0,
+    )
+```
+
+`get_pipeline_state(event_id=677)` includes the identical `output_merger`
+snapshot while retaining its existing top-level `depth_target` and
+`render_targets` fields. Use the focused tool to avoid reading shader bindings
+and constant buffers when only OM is needed.
+
+| Field | Contents |
+|---|---|
+| `depth_target` | Null when unbound; otherwise resource/view IDs, view format, descriptor flags, mip/slice range, read-only depth/stencil flags, and underlying texture dimensions/format/sample count |
+| `render_targets` | RTV descriptors with explicit slots; unbound slots remain present with `bound=false` |
+| `depth_stencil` | Depth enable/write/compare function, read-only flags, front/back stencil operations, reference, compare/write masks; D3D12 depth bounds |
+| `blend` | State object ID when applicable, alpha-to-coverage, independent blending, blend factor, sample mask, per-target color/alpha equations, logic operations, write mask and RGBA channels |
+| `uav_start_slot` | D3D11 OM UAV start slot |
+| `uavs` | D3D11 bound pixel UAV slots or D3D12 pixel shader descriptor accesses, with an explicit `scope` |
+
+Semantics and limits:
+
+- Both pipeline tools require a positive integer event ID. Missing, non-existent,
+  boolean, fractional and string IDs are rejected. Nested actions and API events
+  between draws (for example `OMSetRenderTargets`) are valid.
+- Event selection and snapshot occur in one replay callback, immediately **after**
+  the requested event. The UI selection is unchanged; the replay controller
+  stays at that event, matching explicit-event texture/buffer reads. Always pass
+  the same `event_id` to later pixel reads instead of depending on shared state.
+- `depth_write` is the raw depth write flag. `depth_write_allowed` combines a
+  bound DSV, enabled depth test/write, writable depth aspect, and a comparison
+  other than Never. It does **not** prove a fragment passed coverage, stencil,
+  depth bounds, sample masking or other tests, nor that any pixel changed.
+- DSV `format` describes the **view**; `depth_target.texture.format` describes
+  the resource (which can be typeless). Use `resource_id`, not `view_id`, for
+  `get_texture_data`. A multi-slice or MSAA DSV may require multiple pixel reads.
+- `blend.targets` contains the raw reported state entries. If `independent_blend`
+  is false, `effective_blend_slot` is 0 for every entry; interpret effective
+  blending using `targets[effective_blend_slot]`, including its write mask.
+- D3D11 `uavs.scope=all_bound_pixel_slots` includes bound OM UAVs even when the
+  current shader does not declare them, using the descriptor-store API.
+  D3D12 `uavs.scope=pixel_shader_accesses` covers the shader access list, not
+  every heap descriptor. `access.index` is a reflection index; `binding.register`
+  and `binding.register_space` identify the shader register. Direct heap accesses
+  without a reflected binding have `binding=null`. Neither access-list membership
+  nor `statically_unused=false` proves an actual GPU write.
+- Unsupported graphics APIs return `output_merger.supported=false` and a reason.
+  Descriptor API failures are exposed as `uavs_error`; full pipeline queries
+  expose OM snapshot failures as `output_merger_error` rather than silently
+  returning incomplete OM state.
+
+After updating, copy/reinstall the extension and reload it in RenderDoc, then
+reconnect the MCP client so its tool list refreshes. For an already-open capture,
+the RenderDoc Python Shell can reload it without closing the capture:
+
+```python
+pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")
+```
+
+Regression checks: `python -m unittest discover -s tests -v`.
+
+### Bounded shader inspection
+
+```python
+get_bridge_info()
+get_constant_buffers(event_id=2479, stage="vertex", max_bytes=1048576)
+get_constant_buffers(event_id=2479, stage="pixel", block_index=0)
+get_postvs_data(event_id=2479, instance=0, view=0, stage="vsout", max_bytes=8388608)
+```
+
+- `get_bridge_info().inspection_revision == "shader-inspection-1"` identifies
+  the **loaded** extension code and returns its module path. Disk installation
+  alone does not establish that either open RenderDoc instance has reloaded it.
+- CB queries return real decoded values (recursive arrays/structs/matrices) plus
+  reflection-sized raw bytes with resource ID, offset, requested and actual size.
+  A shared `max_bytes` budget is 1..8 MiB. `block_index` is a reflection index,
+  not register bN. Omitting it selects up to 128 blocks, **one** array element
+  per block; other elements require an explicit block index. Missing data,
+  zero-sized reflection, smaller bindings and budget limits are never reported
+  as complete. Null-resource root/push constants still call the official
+  `GetCBufferVariableContents`; raw-buffer bytes are unavailable for them.
+- `values_complete` means all returned variables were decoded; `complete`
+  permits complete raw bytes as a fallback. Reflection is authoritative for type
+  interpretation; this tool does not guess matrix names or reinterpret UInt as
+  Float. Nonfinite floats are JSON strings `NaN`, `+Infinity`, `-Infinity`;
+  `value_bits` retains the shader value's bits. Matrix values are row-major as
+  returned by RenderDoc, not necessarily their raw memory order.
+- Pipeline SRVs retain legacy `format` (storage format), and add `resource_format`
+  and `view_format` (actual descriptor typed format, including sRGB). Legacy
+  `slot` is explicitly a reflection index; use `binding.fixed_bind_number`,
+  `fixed_bind_set_or_space` and `array_element` for API-specific bindings, never
+  assume the reflection index is tN. Samplers use `UsedDescriptor.sampler` and
+  report filter modes, addressing, mip bias/LOD, comparison and typed border
+  color. Descriptor membership is not proof that a pixel sampled the resource.
+- PostVS accepts an exact draw event, a zero-based instance (not instanceOffset),
+  and an in-range multiview view. It makes one replay selection and one
+  `GetPostVSData` call, returning actual MeshFormat properties and exact bounded
+  raw ranges. Indices + baseVertex (excluding restart) determine the vertex
+  interval; unreferenced gaps are preserved. The limit caps readback, not the
+  driver's internal cost of generating output for that one draw. Derived replay
+  buffers may not appear in GetBuffers; range provenance and short reads are
+  explicit. Unsupported APIs/stages/status return `supported=false` or
+  `complete=false` plus a reason, never guessed mesh data.
+- Post-transform positions are shader output, often clip/post-projection space,
+  **not world space**. No unprojection or other geometry transform is performed.
+  All these tools are capture-read-only. Replay remains at the chosen event;
+  the GUI selection is unchanged. They never close or replace a capture.
+
+For a live capture update, back up the changed source/installed files and their
+SHA-256 hashes, copy **only** changed files (do not use the directory-replacing
+installer during a live update), run the regression suite, then run the official
+`pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")` in **each**
+open instance's Python Shell. Never clear `sys.modules` or reload guessed internal
+modules. Reconnect the MCP client and verify `get_bridge_info` before reading
+new evidence. Unit tests fake the GPU boundary; they do not substitute for a real
+MCP validation against the loaded capture.

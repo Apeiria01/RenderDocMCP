@@ -12,6 +12,4 @@ PROGRESS.md
 .mcp.json
 .vs
 tests/*
-!tests/test_search_service.py
-!tests/test_search_routing.py
-!tests/test_bridge_transport.py
+

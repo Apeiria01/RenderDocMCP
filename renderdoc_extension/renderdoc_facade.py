@@ -4,6 +4,10 @@ Provides thread-safe access to RenderDoc's ReplayController and CaptureContext.
 Searches use AsyncInvoke; existing bounded reads use BlockInvoke.
 """
 
+import os
+
+from .services.inspection_service import InspectionService
+from .utils.inspection import INSPECTION_REVISION
 from .services import (
     CaptureManager,
     ActionService,
@@ -207,9 +211,27 @@ class RenderDocFacade:
 
     # ==================== Pipeline Operations ====================
 
+    def get_bridge_info(self):
+        """Prove which extension code is loaded, without reading or replacing resources."""
+        return {"inspection_revision": INSPECTION_REVISION,
+                "module_path": os.path.abspath(__file__),
+                "capture_loaded": bool(self.ctx.IsCaptureLoaded()),
+                "features": ["constant_buffer_values", "typed_srv_formats",
+                             "sampler_descriptors", "bounded_postvs"]}
+
+    def get_constant_buffers(self, event_id, stage, **options):
+        return InspectionService(self.ctx, self._invoke).get_constant_buffers(event_id, stage, **options)
+
+    def get_postvs_data(self, event_id, **options):
+        return InspectionService(self.ctx, self._invoke).get_postvs_data(event_id, **options)
+
     def get_shader_info(self, event_id, stage):
         """Get shader information for a specific stage"""
         return self._pipeline.get_shader_info(event_id, stage)
+
+    def get_output_merger_state(self, event_id):
+        """Get depth/stencil, DSV/RTVs and blending at one event."""
+        return self._pipeline.get_output_merger_state(event_id)
 
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
