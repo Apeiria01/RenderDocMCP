@@ -66,6 +66,11 @@ def unregister():
     """Called when the extension is unloaded."""
     global _server
     if _server:
+        # Official LoadExtension calls unregister before reloading our submodules.
+        # Refuse to reload while an asynchronous replay callback still owns code.
+        with _server._pending_lock:
+            if _server._request_pending or _server._active_control is not None:
+                raise RuntimeError("MCP Bridge is busy; wait for the active request before LoadExtension")
         _server.stop()
         _server = None
     print("[MCP Bridge] Extension unloaded")

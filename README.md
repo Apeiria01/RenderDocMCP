@@ -1,5 +1,47 @@
 # RenderDoc MCP Server
 
+## Bounded action context and resource provenance (`action-context-1`)
+
+`get_action_context(event_id, before_actions=8, after_actions=2, max_events=128)`
+locates one exact action by scanning only action nodes before reading selected
+actions' API-event arrays. This avoids unrelated large queue/root event arrays.
+Synthetic parent EIDs may be later than their children and never prune traversal.
+The neighboring window is ordered by EID; it is not a proof of command-list
+identity or submission ordering. Closest actions receive the shared event budget
+first. Each selected action contributes a bounded tail of its `events`; omitted
+earlier events are explicit. Typed SDChunk trees expose API arguments (including
+indirect signatures/buffers/count buffers and offsets) while opaque blobs are
+omitted. Optional captured call stacks contain at most 32 addresses, with no
+symbol lookup.
+
+`get_resource_provenance(resource_ids, max_chunks=32)` accepts 1–16 unique,
+non-null `ResourceId::N` strings. It establishes exact resource identity through
+`ReplayController.GetResources()`, then reads only linked `initialisationChunks`
+and parent/derived resource IDs. The chunk limit is shared across requested
+resources. Resource-creation descriptors can expose heap types and command
+signature layouts; initialization metadata alone does not identify a game CPU
+function or prove that a GPU producer was absent.
+
+Both methods run entirely inside one official replay callback and never call
+`SetFrameEvent`, read buffer/texture bytes, resolve symbols, or write captures.
+Bounds cover action/resource/event work, SD child count/depth, elapsed time and
+4 MiB ASCII JSON output. `complete` covers requested non-blob metadata only;
+check `diagnostics`, per-array completion flags and optional call-stack status.
+Native calls cannot be hard-cancelled. Native errors propagate and stop the
+request; no retry, restoration, or alternate target is scheduled.
+
+Before use, verify `get_bridge_info().feature_info.action_context`: revision
+`action-context-1`, matching service revision, current class/method/module and
+membership-service identities, and `dependencies_coherent=true`. Existing
+shader/rasterizer reads now verify exact action membership with an action-only
+fast path before their bounded APIEvent-only fallback. Existing pipeline,
+shader extraction, and indexed search paths are otherwise unchanged.
+
+Regression tests: `python -m unittest discover -s tests -v`. Deploy only changed
+files after checking the original SHA-256 manifest, then use the official
+`pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")` reload. Disk test
+success and version strings do not establish that a live capture has loaded it.
+
 RenderDoc UI拡張機能として動作するMCPサーバー。AIアシスタントがRenderDocのキャプチャデータにアクセスし、グラフィックスデバッグを支援する。
 
 ## アーキテクチャ
@@ -198,7 +240,42 @@ get_pipeline_state(event_id=123)
 
 ```
 list_shader_hashes(stage="pixel", event_id_min=8000, event_id_max=9000)
-list_shader_hashes(stage="all", unique_only=true)
+list_shader_hashes(stage="all", unique_only=True, method="usage_index")
+```
+
+`list_shader_hashes` now uses **shader-hash-index-1**. On replay cores that record
+shader-object usage (including the local D3D12 build), it enumerates that index
+without `SetFrameEvent` and computes CRC32 once per unique shader per request.
+The native capability is established from positive, stage-matching usage entries,
+not a RenderDoc version string. `coverage` reports missing candidate events and
+the limits of the recorded index; `complete` describes index traversal and paging,
+not independent proof of every shader binding.
+
+- `method="auto"` prefers the index. If unavailable, replay is permitted only with
+  both explicit EID bounds. `method="usage_index"` never replays.
+- `method="bounded_replay"` requires both bounds, with `max_events` 1–128 (default
+  32) and `time_budget_ms` 1–10000 (default 5000). It skips unrelated compute or
+  graphics actions, caches repeated shader hashes, and leaves replay at its last
+  event. Native errors/cancellation never trigger restoration or another fallback.
+- `limit` caps event-stage rows (default 10000), also in `unique_only=True` mode.
+  A unique-only page aggregates only that page's rows. Resume with the exact
+  `next_cursor` and unchanged query/capture; an EID alone can lose a VS/PS row when
+  a page boundary splits the event. Inspect `supported`, `partial`, `complete`,
+  `diagnostics`, and `coverage`; incomplete index traversal has no reliable cursor.
+- Requests use the official replay queue asynchronously and cooperatively check
+  cancellation and work budgets. Individual native calls are not hard-cancellable.
+  Action/resource/usage/shader-byte/output limits bound local work and responses.
+- The client requires the installed bridge's `shader_hash_enumeration=1` capability
+  before sending this request, preventing accidental use of the old full-frame
+  synchronous loop. `get_bridge_info().feature_info.shader_hashes` reports loaded
+  revision and wiring identity independently of older inspection features.
+
+For an upstream core without shader-object usage, use a bounded query, for example:
+
+```python
+list_shader_hashes(stage="pixel", method="bounded_replay",
+                   event_id_min=8000, event_id_max=8100,
+                   max_events=16, time_budget_ms=2000)
 ```
 
 ### 指定イベントのリソース取得
@@ -360,9 +437,12 @@ get_constant_buffers(event_id=2479, stage="pixel", block_index=0)
 get_postvs_data(event_id=2479, instance=0, view=0, stage="vsout", max_bytes=8388608)
 ```
 
-- `get_bridge_info().inspection_revision == "shader-inspection-1"` identifies
-  the **loaded** extension code and returns its module path. Disk installation
-  alone does not establish that either open RenderDoc instance has reloaded it.
+- `get_bridge_info().inspection_revision == "shader-inspection-2"` identifies
+  the **loaded** facade, but that string alone is insufficient. All five
+  `component_revisions` must match, and `dependencies_coherent`,
+  `pipeline_instance_current` and `serializer_module_current` must be true.
+  The response also returns the loaded module path. Disk installation alone
+  does not establish that either open RenderDoc instance has reloaded it.
 - CB queries return real decoded values (recursive arrays/structs/matrices) plus
   reflection-sized raw bytes with resource ID, offset, requested and actual size.
   A shared `max_bytes` budget is 1..8 MiB. `block_index` is a reflection index,
@@ -400,9 +480,182 @@ get_postvs_data(event_id=2479, instance=0, view=0, stage="vsout", max_bytes=8388
 
 For a live capture update, back up the changed source/installed files and their
 SHA-256 hashes, copy **only** changed files (do not use the directory-replacing
-installer during a live update), run the regression suite, then run the official
+installer during a live update), and run the regression suite. Wait for all MCP
+requests to finish and disconnect the client, then run the official
 `pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")` in **each**
-open instance's Python Shell. Never clear `sys.modules` or reload guessed internal
-modules. Reconnect the MCP client and verify `get_bridge_info` before reading
-new evidence. Unit tests fake the GPU boundary; they do not substitute for a real
-MCP validation against the loaded capture.
+open instance's Python Shell. `unregister` refuses an active/pending request;
+never force a reload around that guard. Never clear `sys.modules` or reload
+guessed internal modules. Reconnect the MCP client and verify all the dependency
+fields above, followed by actual typed SRV/sampler/CB results. Unit tests fake
+the GPU boundary; they do not substitute for real MCP capture validation.
+
+The inspected upstream `PythonContext.cpp` loader reloads extension submodules
+in module-table enumeration order, not dependency order. A parent package's
+`from child import Class` can therefore keep an old class after the child has
+reloaded, even when the facade reports a new revision. Inspection services and
+helpers now retain module objects and resolve their current attributes at use
+time. The extension does **not** perform additional `importlib.reload` calls.
+`tests/test_extension_reload.py` reproduces stale aliases and verifies insertion,
+parent-first and child-first reload orders in isolated fake packages; this does
+not assert the exact implementation of a particular installed RenderDoc binary.
+
+For collection clients, treat dependency coherence, decoded CB values, raw-byte
+integrity, typed SRV/sampler metadata and PostVS as independent evidence gates.
+A **local validation** failure after a successful request must remain incomplete,
+but need not prevent a different bounded read. Any timeout/transport/API exception
+must stop the request sequence instead of queueing more replay work. The project
+collector `Scripts/RenderReplica/verify_mcp_inspection.py --collect --resume-from
+<prior-evidence-directory>` reuses known E2479 CB/pipeline evidence, rechecks every
+binary length/SHA-256 from disk, and reads only missing E2479 PostVS plus E1550 CB.
+It writes a new directory, allows only the explicitly reviewed revision-1 recovery
+surface, never retries its known-stale pipeline, and cannot declare the full
+revision-2 evidence set complete. Raw-complete is not decoded-values-complete or
+world-space reconstruction; the normal `--collect` mode still requires coherent
+revision-2 dependencies before issuing replay reads.
+
+### Bounded draw metadata (`draw-metadata-3`)
+
+Three separate read-only tools fill gaps without expanding the existing pipeline
+or shader-info queries:
+
+```python
+info = get_bridge_info()
+# Check feature_info.draw_metadata availability, all three draw-metadata-3
+# component revisions, module/class identities and coherence before new calls.
+get_rasterizer_state(event_id=2479)
+get_shader_artifact(event_id=2479, stage="vertex", max_bytes=1048576)
+get_shader_artifact(event_id=2479, stage="pixel", max_bytes=1048576)
+get_api_events(event_id_min=2464, event_id_max=2479, max_events=128)
+```
+
+- `get_rasterizer_state` supports D3D12 and returns actual rasterizer fields,
+  viewports/scissors, `sampleMask`, exposed float bits and separately proven PSO
+  sampling. Missing API members are reported, not replaced by defaults.
+  Zero-sized viewport/scissor entries are retained. Revision 3 removes the old
+  `outputMerger.multiSampleCount/multiSampleQuality` output: these are **not**
+  native `D3D12OM` fields. Use `sampling` below, not texture `msSamp/msQual`.
+- `get_shader_artifact` reads one VS or PS reflection, original `rawBytes`,
+  `reflection.entryPoint`, encoding, identity, CRC32, input/output signatures and
+  actual disassembly targets. Default `disassembly_target=None` performs **no
+  disassembly**. An explicitly selected available target is attempted once,
+  without fallback. `max_bytes` and `max_text_bytes` are each 1..1048576;
+  oversized payloads remain incomplete. The external caller computes SHA256
+  from decoded original bytes. Reflection signatures do **not** contain
+  interpolation modes; `_centroid` in a semantic name proves no such mode.
+- `get_api_events` reads official action/APIEvent/structured-chunk metadata, not
+  a per-EID replay scan. Inclusive ranges contain at most 256 IDs and return at
+  most 128 events. An event's owning action may be outside the requested range.
+  Node/time traversal budgets, missing chunks, duplicates/conflicts and output
+  limits are explicit. Incomplete traversal does not establish global sorting,
+  complete coverage or a reliable next-page cursor. An event ID is not itself
+  proof of an exact before-draw replay boundary; `fileOffset` is not an absolute
+  offset into the capture file.
+
+#### PSO sampling contract
+
+Within the **same** official replay callback, after exact event membership and
+one `SetFrameEvent(event_id, False)`, the rasterizer tool follows:
+
+`D3D12State.pipelineResourceId` -> `ReplayController.GetResources()` -> exact,
+unique `ResourceDescription.resourceId` -> `initialisationChunks` ->
+`ReplayController.GetStructuredFile().chunks[index]` -> PSO creation fields.
+
+Only these upstream structured shapes are accepted (names are literal):
+
+| `chunk_name` | Sample descriptor path | Required identity field |
+|---|---|---|
+| `ID3D12Device::CreateGraphicsPipeline` | `pDesc.SampleDesc` | `pPipelineState` |
+| `ID3D12Device2::CreatePipelineState` | `pDesc.SampleDesc` | `pPipelineState` |
+
+The first name intentionally has **no `State` suffix**, unlike the C++ API
+method. `pPipelineState` must have `SDBasic.Resource` type before `AsResourceId`
+is called, and must equal the selected non-null PSO. Both direct `Count` and
+`Quality` children must be childless `SDBasic.UnsignedInteger`, `byteSize=4`,
+with strict uint32 `AsInt()` results; Count must be positive. Enum equality,
+not the spelling of `str(enum)`, produces the reported `UnsignedInteger` names.
+
+The result contains:
+
+```text
+sampling = {
+  complete: bool,
+  source: "D3D12 PSO initialisation chunks",
+  pipeline_resource_id: str | null,
+  sample_count: int | null,
+  sample_quality: int | null,
+  provenance: [{
+    chunk_index: int, chunk_name: str, sample_desc_path: "pDesc.SampleDesc",
+    count_type: "UnsignedInteger", quality_type: "UnsignedInteger",
+    pipeline_resource_path: "pPipelineState", pipeline_resource_id: str
+  }],
+  resource_description_index: int,  # only after exact unique resource linkage
+  traversal: { ...counts, limits, completion, elapsed time and stop reason... }
+}
+```
+
+No global structured-file scan, arbitrary nested `SampleDesc` search, blob read,
+per-event replay scan, texture substitution or guessed default is used. Direct
+child lookup uses bounded `NumChildren/GetChild`, checks duplicates before
+selecting a field, and follows only the allowlisted path. Every linked chunk
+must be recognized and all verified creation records must agree. Missing,
+invalid, duplicate, unknown (including unrecognized auxiliary initialization
+chunks), conflicting or over-budget metadata leaves **both sample values null**,
+`sampling.complete=false`, top-level `complete=false`, and diagnostic paths
+under `sampling`. Partial provenance may describe inspected candidates, never
+successful sampling. A valid sampling sub-result can coexist with another
+incomplete rasterizer field; check top-level completeness too.
+
+Sampling limits are 32768 resource descriptions, 64 linked chunk indices,
+128 direct children per object, 4096 child visits, depth 3 (chunk=0), and 250 ms
+cooperative elapsed time. Oversized resource/chunk lists are rejected before
+item traversal. Traversal evidence includes visited counts, scan-completion
+flags, limits, elapsed time, stop reason, `global_chunk_scan_performed=false`
+and `native_calls_hard_cancellable=false`. The existing 4096-byte string and
+4 MiB total ASCII-JSON bounds still apply; exceeding the latter returns an
+explicit `output_omitted` failure rather than the original payload.
+`complete_scope` explicitly covers requested rasterizer/PSO metadata, **not
+shader execution or image equivalence**.
+
+Serialization provenance was checked against official upstream `v1.x` sources:
+
+- [d3d12_stringise.cpp](https://github.com/baldurk/renderdoc/blob/v1.x/renderdoc/driver/d3d12/d3d12_stringise.cpp): literal chunk names.
+- [d3d12_device_wrap.cpp](https://github.com/baldurk/renderdoc/blob/v1.x/renderdoc/driver/d3d12/d3d12_device_wrap.cpp) and [d3d12_device_wrap2.cpp](https://github.com/baldurk/renderdoc/blob/v1.x/renderdoc/driver/d3d12/d3d12_device_wrap2.cpp): named `pDesc`, typed `pPipelineState` and PSO resource linkage.
+- [d3d12_serialise.cpp](https://github.com/baldurk/renderdoc/blob/v1.x/renderdoc/driver/d3d12/d3d12_serialise.cpp): direct `SampleDesc` in graphics and expanded-stream descriptors.
+- [dxgi_common.cpp](https://github.com/baldurk/renderdoc/blob/v1.x/renderdoc/driver/dxgi/dxgi_common.cpp): direct `DXGI_SAMPLE_DESC.Count/Quality` serialization.
+- [ResourceDescription](https://renderdoc.org/docs/python_api/renderdoc/resources.html) and [structured data API](https://renderdoc.org/docs/python_api/renderdoc/structured_data.html): `initialisationChunks`, `NumChildren/GetChild`, typed conversion contracts.
+
+These sources corroborate the implementation's allowlist; they do **not** prove
+that the current capture or a locally reported 1.47 binary exposes those shapes.
+**Live revision-3 sampling proof remains unavailable until the user's official
+reload and bounded validation.** Tests only exercise real-shaped fakes.
+
+#### Execution and update boundaries
+
+Integers reject strings, floats and booleans. String/signature/array/total-JSON
+limits supplement the raw/text limits. `IsCaptureLoaded` runs on the UI thread;
+`GetRootActions`, `GetResources` and `GetStructuredFile` use ReplayController
+receivers for these tools and are traversed inside one official replay callback.
+Raster/shader membership and state reads share that callback. API events use
+one metadata-only callback with **zero SetFrameEvent**, not a per-event scan.
+Native metadata and retained getters stay in the callback. Revision 2 corrected
+revision 1's invalid CaptureContext receiver; revision 3 preserves that rule.
+Tests reject wrong receivers/threads and the fictitious OM sampling properties.
+These bounds cannot hard-cancel one native getter, disassembly or `BlockInvoke`,
+or cap its internal GPU cost. Native/API exceptions terminate and propagate;
+timeout/transport/API failures stop the sequence without restore, retry, changed
+targets or additional queued reads. No texture/buffer data, additional shader
+stages, capture writes or resource replacements are involved. Check
+supported/complete/diagnostics before requiring success-only fields: unavailable
+membership is not a change of graphics API.
+
+The feature has its own revision and module/class coherence checks under
+`feature_info.draw_metadata`. Existing `features` remains a list and the old
+five-component `shader-inspection-2` contract remains unchanged. Old pipeline,
+shader-inspection and search execution paths are unchanged.
+
+Use SHA-guarded backups and deploy only changed extension files after tests pass
+and all requests/clients have ended. Reload only the target instance that needs
+the new tools using the official command, then refresh the MCP client connection
+and verify both feature gates. Do not force the busy-unregister guard or repeatedly
+reload a failing request. Unit tests and successful copying do not establish live
+capture validation, original VS/PS execution, interpolation or image equivalence.

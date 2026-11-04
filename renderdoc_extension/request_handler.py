@@ -5,7 +5,7 @@ Routes incoming requests to appropriate facade methods.
 
 import traceback
 
-from .request_control import RequestCancelled
+from . import request_control
 
 
 class RequestHandler:
@@ -27,6 +27,11 @@ class RequestHandler:
             "get_action_timings": self._handle_get_action_timings,
             "get_shader_info": self._handle_get_shader_info,
             "get_bridge_info": self._handle_get_bridge_info,
+            "get_rasterizer_state": self._handle_get_rasterizer_state,
+            "get_shader_artifact": self._handle_get_shader_artifact,
+            "get_api_events": self._handle_get_api_events,
+            "get_action_context": self._handle_get_action_context,
+            "get_resource_provenance": self._handle_get_resource_provenance,
             "get_constant_buffers": self._handle_get_constant_buffers,
             "get_postvs_data": self._handle_get_postvs_data,
             "get_buffer_contents": self._handle_get_buffer_contents,
@@ -61,9 +66,17 @@ class RequestHandler:
             traceback.print_exc()
             return self._error_response(request_id, -32000, str(e))
 
+    def _handle_get_action_context(self, params):
+        return self.facade.get_action_context(params["event_id"],
+            params.get("before_actions", 8), params.get("after_actions", 2), params.get("max_events", 128))
+
+    def _handle_get_resource_provenance(self, params):
+        return self.facade.get_resource_provenance(params["resource_ids"], params.get("max_chunks", 32))
+
     _SEARCH_METHODS = frozenset((
         "find_draws_by_shader", "find_draws_by_texture",
         "find_draws_by_resource", "find_resource_usage",
+        "list_shader_hashes",
     ))
 
     def handle_async(self, request, complete, control=None):
@@ -78,7 +91,7 @@ class RequestHandler:
                 response = {"id": request_id, "result": result}
             else:
                 # Cancellation is cooperative between RenderDoc API calls.
-                if isinstance(error, RequestCancelled):
+                if isinstance(error, request_control.RequestCancelled):
                     code = -32800
                 elif isinstance(error, (ValueError, TypeError)):
                     code = -32602
@@ -88,7 +101,9 @@ class RequestHandler:
             complete(response)
 
         try:
-            self.facade.search_async(
+            schedule = (self.facade.shader_hashes_async if method == "list_shader_hashes"
+                        else self.facade.search_async)
+            schedule(
                 lambda service: self._dispatch_search(
                     method, request.get("params", {}), service
                 ),
@@ -100,6 +115,8 @@ class RequestHandler:
 
     def _dispatch_search(self, method, params, target=None):
         target = target if target is not None else self.facade
+        if method == "list_shader_hashes":
+            return target.list_shader_hashes(**self._shader_hash_options(params))
         parameter = {
             "find_draws_by_shader": "shader_name",
             "find_draws_by_texture": "texture_name",
@@ -208,6 +225,23 @@ class RequestHandler:
     def _handle_get_bridge_info(self, params):
         return self.facade.get_bridge_info()
 
+    def _handle_get_rasterizer_state(self, params):
+        return self.facade.get_rasterizer_state(params.get("event_id"))
+
+    def _handle_get_shader_artifact(self, params):
+        return self.facade.get_shader_artifact(
+            params.get("event_id"), params.get("stage"),
+            max_bytes=params.get("max_bytes", 1048576),
+            disassembly_target=params.get("disassembly_target"),
+            max_text_bytes=params.get("max_text_bytes", 1048576),
+        )
+
+    def _handle_get_api_events(self, params):
+        return self.facade.get_api_events(
+            params.get("event_id_min"), params.get("event_id_max"),
+            max_events=params.get("max_events", 128),
+        )
+
     def _handle_get_constant_buffers(self, params):
         return self.facade.get_constant_buffers(
             params.get("event_id"), params.get("stage"),
@@ -271,19 +305,21 @@ class RequestHandler:
         return self.facade.list_set_render_targets()
 
     def _handle_list_shader_hashes(self, params):
-        """Handle list_shader_hashes request"""
-        stage = params.get("stage", "pixel")
-        event_id_min = params.get("event_id_min")
-        event_id_max = params.get("event_id_max")
-        unique_only = params.get("unique_only", False)
-        limit = params.get("limit")
-        return self.facade.list_shader_hashes(
-            stage=stage,
-            event_id_min=int(event_id_min) if event_id_min is not None else None,
-            event_id_max=int(event_id_max) if event_id_max is not None else None,
-            unique_only=bool(unique_only),
-            limit=int(limit) if limit is not None else None,
-        )
+        """Synchronous compatibility entry; normal IPC routes asynchronously."""
+        return self.facade.list_shader_hashes(**self._shader_hash_options(params))
+
+    @staticmethod
+    def _shader_hash_options(params):
+        # Preserve types so the service can reject bool/string/float integers.
+        return {"stage": params.get("stage", "pixel"),
+                "event_id_min": params.get("event_id_min"),
+                "event_id_max": params.get("event_id_max"),
+                "unique_only": params.get("unique_only", False),
+                "limit": params.get("limit"),
+                "method": params.get("method", "auto"),
+                "max_events": params.get("max_events", 32),
+                "time_budget_ms": params.get("time_budget_ms", 5000),
+                "cursor": params.get("cursor")}
 
     def _handle_list_captures(self, params):
         """Handle list_captures request"""

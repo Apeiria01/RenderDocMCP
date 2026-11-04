@@ -3,11 +3,10 @@ import struct
 
 import renderdoc as rd
 
-from ..utils import Helpers, Parsers
-from ..utils.inspection import (
-    DEFAULT_CB_BYTES, MAX_READ_BYTES, constant_buffers, format_info,
-    integer, json_number, raw_read, resource_id,
-)
+from ..utils import Helpers, Parsers, inspection
+from ..utils.inspection import DEFAULT_CB_BYTES, MAX_READ_BYTES
+
+INSPECTION_SERVICE_REVISION = "shader-inspection-2"
 
 
 class InspectionService:
@@ -34,6 +33,7 @@ class InspectionService:
 
     def get_constant_buffers(self, event_id, stage, block_index=None,
                              array_element=0, max_bytes=DEFAULT_CB_BYTES):
+        integer, constant_buffers = inspection.integer, inspection.constant_buffers
         if not isinstance(stage, str) or stage not in (
                 "vertex", "hull", "domain", "geometry", "pixel", "compute"):
             raise ValueError("Invalid shader stage")
@@ -61,6 +61,7 @@ class InspectionService:
 
     def get_postvs_data(self, event_id, instance=0, view=0,
                         stage="vsout", max_bytes=MAX_READ_BYTES):
+        integer = inspection.integer
         integer(instance, "instance")
         integer(view, "view")
         integer(max_bytes, "max_bytes", 1, MAX_READ_BYTES)
@@ -126,6 +127,8 @@ class InspectionService:
 
     @staticmethod
     def _mesh_format(mesh):
+        format_info = inspection.format_info
+        json_number, resource_id = inspection.json_number, inspection.resource_id
         result = {"format": format_info(mesh.format), "missing_fields": []}
         fields = {
             "indexResourceId": resource_id, "indexByteOffset": int,
@@ -163,6 +166,7 @@ class InspectionService:
 
     @staticmethod
     def _mesh_buffers(controller, mesh, budget, result):
+        raw_read = inspection.raw_read
         n = int(mesh.numIndices)
         stride = int(mesh.vertexByteStride)
         if n <= 0 or stride <= 0:

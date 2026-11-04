@@ -4,9 +4,9 @@ import math
 
 import renderdoc as rd
 
-from .serializers import Serializers
+from . import serializers
 
-INSPECTION_REVISION = "shader-inspection-1"
+INSPECTION_REVISION = "shader-inspection-2"
 MAX_READ_BYTES = 8 * 1024 * 1024
 DEFAULT_CB_BYTES = 1024 * 1024
 
@@ -190,7 +190,7 @@ def constant_buffers(controller, pipe, reflection, stage, block_index=None,
                     variables = controller.GetCBufferVariableContents(
                         pipeline, reflection.resourceId, stage, reflection.entryPoint,
                         i, rid, offset, required)
-                    item["variables"] = Serializers.serialize_variables(variables)
+                    item["variables"] = serializers.Serializers.serialize_variables(variables)
                     item["values_complete"] = (len(variables) == len(cb.variables)
                                                and variables_complete(item["variables"]))
                     if not item["values_complete"]:

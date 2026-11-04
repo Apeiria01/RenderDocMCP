@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-age/
 venv/
 .env
 dist/
@@ -12,4 +13,9 @@ PROGRESS.md
 .mcp.json
 .vs
 tests/*
+analysis/
+.claude/
+.codex/
+
+
 

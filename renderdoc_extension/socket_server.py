@@ -255,7 +255,7 @@ class MCPBridgeServer(QObject):
         # Version these guarantees independently of the RenderDoc version.
         # The client must not send full-frame searches to an older extension.
         info["protocol_version"] = 2
-        info["capabilities"] = {"safe_search": 1}
+        info["capabilities"] = {"safe_search": 1, "shader_hash_enumeration": 1}
         try:
             # Self-heal: recreate the mailbox if something removed it
             if not os.path.isdir(self.instance_dir):

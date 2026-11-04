@@ -6,9 +6,11 @@ import zlib
 
 import renderdoc as rd
 
-from ..utils import Parsers, Serializers, Helpers
+from ..utils import Parsers, Serializers, Helpers, inspection
 from ..utils.output_merger import serialize_output_merger
-from ..utils.inspection import access_binding, constant_buffers, format_info, sampler_info
+from . import shader_hash_service
+# Resolve inspection helpers inside methods after official extension reload finishes.
+PIPELINE_INSPECTION_REVISION = "shader-inspection-2"
 
 
 class PipelineService:
@@ -401,137 +403,14 @@ class PipelineService:
             raise ValueError(result["error"])
         return result["data"]
 
-    def list_shader_hashes(
-        self,
-        stage="pixel",
-        event_id_min=None,
-        event_id_max=None,
-        unique_only=False,
-        limit=None,
-    ):
-        """List shader hashes observed in pipeline state events."""
-        if not self.ctx.IsCaptureLoaded():
-            raise ValueError("No capture loaded")
-
-        result = {"data": None, "error": None}
-
-        def callback(controller):
-            structured_file = controller.GetStructuredFile()
-            actions = Helpers.flatten_actions(controller.GetRootActions())
-            api = controller.GetAPIProperties().pipelineType
-
-            stage_filter = (stage or "pixel").lower()
-            if stage_filter == "all":
-                stages = Helpers.get_all_shader_stages()
-            else:
-                stages = [Parsers.parse_stage(stage_filter)]
-
-            events = []
-            unique = {}
-
-            for action in actions:
-                event_id = action.eventId
-                if event_id_min is not None and event_id < event_id_min:
-                    continue
-                if event_id_max is not None and event_id > event_id_max:
-                    continue
-                if not (action.flags & (rd.ActionFlags.Drawcall | rd.ActionFlags.Dispatch)):
-                    continue
-
-                controller.SetFrameEvent(event_id, True)
-                pipe = controller.GetPipelineState()
-
-                for stage_enum in stages:
-                    shader = pipe.GetShader(stage_enum)
-                    if shader == rd.ResourceId.Null():
-                        continue
-
-                    reflection = pipe.GetShaderReflection(stage_enum)
-                    shader_hash = self._get_shader_hash_info(reflection)
-                    if not shader_hash:
-                        continue
-
-                    stage_name = self._stage_name(stage_enum)
-                    entry_point = pipe.GetShaderEntryPoint(stage_enum)
-                    resource_id = str(shader)
-
-                    item = {
-                        "event_id": event_id,
-                        "action_id": action.actionId,
-                        "name": action.GetName(structured_file),
-                        "stage": stage_name,
-                        "resource_id": resource_id,
-                        "entry_point": entry_point,
-                        "hash_dec": shader_hash["dec"],
-                        "hash_hex": shader_hash["hex"],
-                        "bytecode_size": shader_hash["bytecode_size"],
-                    }
-
-                    if "encoding" in shader_hash:
-                        item["encoding"] = shader_hash["encoding"]
-
-                    try:
-                        resource_name = self.ctx.GetResourceName(shader)
-                        if resource_name:
-                            item["resource_name"] = resource_name
-                    except Exception:
-                        pass
-
-                    if not unique_only:
-                        events.append(item)
-                        if limit is not None and len(events) >= limit:
-                            break
-
-                    key = (stage_name, shader_hash["dec"])
-                    if key not in unique:
-                        unique[key] = {
-                            "stage": stage_name,
-                            "hash_dec": shader_hash["dec"],
-                            "hash_hex": shader_hash["hex"],
-                            "bytecode_size": shader_hash["bytecode_size"],
-                            "resource_ids": [],
-                            "entry_points": [],
-                            "event_ids": [],
-                            "first_event_id": event_id,
-                        }
-                        if "encoding" in shader_hash:
-                            unique[key]["encoding"] = shader_hash["encoding"]
-
-                    unique_item = unique[key]
-                    if resource_id not in unique_item["resource_ids"]:
-                        unique_item["resource_ids"].append(resource_id)
-                    if entry_point not in unique_item["entry_points"]:
-                        unique_item["entry_points"].append(entry_point)
-                    unique_item["event_ids"].append(event_id)
-
-                if limit is not None and not unique_only and len(events) >= limit:
-                    break
-
-            unique_shaders = list(unique.values())
-            unique_shaders.sort(key=lambda item: (item["first_event_id"], item["stage"], item["hash_dec"]))
-            for item in unique_shaders:
-                item["event_count"] = len(item["event_ids"])
-
-            result["data"] = {
-                "api": str(api),
-                "stage": stage_filter,
-                "event_id_min": event_id_min,
-                "event_id_max": event_id_max,
-                "count": len(events) if not unique_only else sum(len(i["event_ids"]) for i in unique_shaders),
-                "unique_count": len(unique_shaders),
-                "unique_shaders": unique_shaders,
-            }
-
-            if not unique_only:
-                result["data"]["events"] = events
-            if limit is not None:
-                result["data"]["limit"] = limit
-
-        self._invoke(callback)
-
-        if result["error"]:
-            raise ValueError(result["error"])
-        return result["data"]
+    def list_shader_hashes(self, stage="pixel", event_id_min=None, event_id_max=None,
+                           unique_only=False, limit=None, method="auto", max_events=32,
+                           time_budget_ms=5000, cursor=None):
+        """Delegate old callers to the bounded/indexed implementation."""
+        return shader_hash_service.ShaderHashService(self.ctx, self._invoke).list_shader_hashes(
+            stage=stage, event_id_min=event_id_min, event_id_max=event_id_max,
+            unique_only=unique_only, limit=limit, method=method, max_events=max_events,
+            time_budget_ms=time_budget_ms, cursor=cursor)
 
     def _get_shader_hash_info(self, reflection):
         """Compute the ReShade/ShaderToggler-compatible CRC32 from shader bytecode."""
@@ -577,6 +456,7 @@ class PipelineService:
 
     def _get_stage_resources(self, controller, pipe, stage, reflection):
         """Get shader resource views (SRVs) for a stage"""
+        access_binding, format_info = inspection.access_binding, inspection.format_info
         resources = []
         try:
             srvs = pipe.GetReadOnlyResources(stage, False)
@@ -649,7 +529,7 @@ class PipelineService:
             sampler_list = pipe.GetSamplers(stage, False)
             bindings = reflection.samplers if reflection else []
             for samp in sampler_list:
-                samplers.append(sampler_info(samp, bindings))
+                samplers.append(inspection.sampler_info(samp, bindings))
         except Exception as e:
             samplers.append({"error": str(e)})
 
@@ -719,7 +599,7 @@ class PipelineService:
 
     def _get_cbuffer_info(self, controller, pipe, reflection, stage):
         """Use the same bounded value/raw fallback contract as the dedicated tool."""
-        return constant_buffers(controller, pipe, reflection, stage)["constant_buffers"]
+        return inspection.constant_buffers(controller, pipe, reflection, stage)["constant_buffers"]
 
     def _get_resource_bindings(self, reflection):
         """Get shader resource bindings"""

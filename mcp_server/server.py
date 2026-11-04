@@ -3,10 +3,10 @@ RenderDoc MCP Server
 FastMCP 2.0 server providing access to RenderDoc capture data.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastmcp import FastMCP
-from pydantic import StrictInt
+from pydantic import Field, StrictBool, StrictInt, StrictStr
 
 from .bridge.client import RenderDocBridge, RenderDocBridgeError
 from .config import settings
@@ -288,6 +288,124 @@ def get_bridge_info() -> dict:
 
 
 @mcp.tool
+def get_rasterizer_state(
+    event_id: Annotated[StrictInt, Field(ge=1, le=4294967295)],
+) -> dict:
+    """Read D3D12 rasterizer, viewport/scissor and proven PSO sampling metadata.
+
+    Requires coherent feature_info.draw_metadata revision draw-metadata-3.
+    Exact membership, SetFrameEvent, pipeline state, ReplayController.GetResources
+    and GetStructuredFile all share one official replay callback. Sampling follows
+    pipelineResourceId -> exact ResourceDescription.initialisationChunks -> indexed
+    PSO creation chunks. Only ID3D12Device::CreateGraphicsPipeline and
+    ID3D12Device2::CreatePipelineState at pDesc.SampleDesc are accepted; the typed
+    pPipelineState must match. sampling reports complete/source/pipeline_resource_id,
+    sample_count/sample_quality, provenance (chunk/index/path/UnsignedInteger types)
+    and traversal budgets. No fictitious outputMerger multisample fields, texture
+    sample substitution, nested name search, blob reads or guessed defaults.
+    Missing/invalid/unknown/conflicting metadata stays incomplete with null values.
+    Zero-sized viewports/scissors, sampleMask and exposed float bits are preserved.
+    Replay remains immediately after event_id; GUI selection is unchanged.
+    This proves requested metadata, not shader execution or image equivalence.
+    Resource/chunk/child/depth/time/JSON bounds cannot hard-cancel a native getter.
+    API failures terminate without restore, retry or hidden fallback.
+    """
+    return bridge.call("get_rasterizer_state", {"event_id": event_id})
+
+
+@mcp.tool
+def get_shader_artifact(
+    event_id: Annotated[StrictInt, Field(ge=1, le=4294967295)],
+    stage: Literal["vertex", "pixel"],
+    max_bytes: Annotated[StrictInt, Field(ge=1, le=1048576)] = 1048576,
+    disassembly_target: Annotated[StrictStr, Field(max_length=4096)] | None = None,
+    max_text_bytes: Annotated[StrictInt, Field(ge=1, le=1048576)] = 1048576,
+) -> dict:
+    """Read original shader bytes, CRC32 and reflection signatures for ONE VS/PS.
+
+    Requires draw-metadata-3. Raw bytes and optional text are separately capped
+    at 1 MiB. Returns actual encoding and available disassembly targets; by
+    default no disassembly is performed. An explicit known target is tried once,
+    with no fallback. Native failures stop the request, without restoring replay.
+    SHA256 is left to the caller. Reflection signatures do NOT prove interpolation
+    modes; semantic names such as _centroid are not an interpolation contract.
+    No other shader stages, texture/buffer reads or shader replacement occur.
+    Output bounds do not limit the driver's internal cost of one native getter.
+    """
+    return bridge.call("get_shader_artifact", {
+        "event_id": event_id, "stage": stage, "max_bytes": max_bytes,
+        "disassembly_target": disassembly_target, "max_text_bytes": max_text_bytes,
+    })
+
+
+@mcp.tool
+def get_api_events(
+    event_id_min: Annotated[StrictInt, Field(ge=1, le=4294967295)],
+    event_id_max: Annotated[StrictInt, Field(ge=1, le=4294967295)],
+    max_events: Annotated[StrictInt, Field(ge=1, le=128)] = 128,
+) -> dict:
+    """Read APIEvent/action/chunk metadata within an inclusive range <=256 EIDs.
+
+    Requires draw-metadata-3. One metadata-only callback reads the controller's
+    GetRootActions/GetStructuredFile; zero SetFrameEvent, no per-event replay.
+    The owning action may lie outside the range. Traversal has node and cooperative
+    time budgets in addition to the result limit (1..128). Incomplete traversal does
+    not establish global sorting/coverage or a reliable next-page cursor.
+    Missing chunks, duplicate/conflicting events and limits remain explicit.
+    A returned EID alone is not proof of an exact before-draw replay boundary.
+    """
+    return bridge.call("get_api_events", {
+        "event_id_min": event_id_min, "event_id_max": event_id_max,
+        "max_events": max_events,
+    })
+
+
+@mcp.tool
+def get_action_context(
+    event_id: Annotated[StrictInt, Field(ge=1, le=4294967295)],
+    before_actions: Annotated[StrictInt, Field(ge=0, le=32)] = 8,
+    after_actions: Annotated[StrictInt, Field(ge=0, le=32)] = 2,
+    max_events: Annotated[StrictInt, Field(ge=1, le=512)] = 128,
+) -> dict:
+    """Read exact action context and typed structured API parameters without replay.
+
+    Requires coherent feature_info.action_context revision action-context-1.
+    First scans only action nodes, not their APIEvent arrays, to verify one exact
+    action and its parent path. Returns an EID-ordered neighboring action window;
+    synthetic parent EIDs are never used to prune children. Nearest actions get
+    the event budget first, with the bounded tail of each owning action.events.
+    Omitted earlier events are explicit; this is not a full command-list history.
+    Typed ExecuteIndirect/Copy/bind parameters include resource IDs and offsets.
+    Opaque blobs are never read. All getters share one official replay callback,
+    with action/event/SD child/depth/time/JSON limits. No SetFrameEvent, buffer
+    reads, capture writes, or state restoration; native errors propagate.
+    """
+    return bridge.call("get_action_context", {"event_id": event_id,
+        "before_actions": before_actions, "after_actions": after_actions,
+        "max_events": max_events})
+
+
+@mcp.tool
+def get_resource_provenance(
+    resource_ids: Annotated[list[Annotated[StrictStr, Field(pattern=r"^ResourceId::[1-9][0-9]{0,19}$")]], Field(min_length=1, max_length=16)],
+    max_chunks: Annotated[StrictInt, Field(ge=1, le=64)] = 32,
+) -> dict:
+    """Read exact resource parents/derived IDs and typed initialization chunks.
+
+    Requires coherent feature_info.action_context revision action-context-1.
+    Explicit unique non-null ResourceId strings only. GetResources establishes
+    unique identity before indexing ResourceDescription.initialisationChunks;
+    creation descriptors expose available heap/signature fields. max_chunks is
+    shared across requested resources. Opaque contents/blobs are omitted, never
+    read; absence of a writer here does not establish CPU/GPU generation origin.
+    One metadata-only replay callback, zero SetFrameEvent, bounded resources,
+    relations/chunks/SD children/depth/time/JSON; errors stop without retry.
+    """
+    return bridge.call("get_resource_provenance", {"resource_ids": resource_ids,
+        "max_chunks": max_chunks})
+
+
+@mcp.tool
 def get_constant_buffers(
     event_id: StrictInt,
     stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"],
@@ -498,27 +616,44 @@ def list_set_render_targets() -> dict:
 @mcp.tool
 def list_shader_hashes(
     stage: Literal["all", "vertex", "hull", "domain", "geometry", "pixel", "compute"] = "pixel",
-    event_id_min: int | None = None,
-    event_id_max: int | None = None,
-    unique_only: bool = False,
-    limit: int | None = None,
+    event_id_min: StrictInt | None = None,
+    event_id_max: StrictInt | None = None,
+    unique_only: StrictBool = False,
+    limit: StrictInt | None = None,
+    method: Literal["auto", "usage_index", "bounded_replay"] = "auto",
+    max_events: Annotated[StrictInt, Field(ge=1, le=128)] = 32,
+    time_budget_ms: Annotated[StrictInt, Field(ge=1, le=10000)] = 5000,
+    cursor: StrictStr | None = None,
 ) -> dict:
     """
-    List ReShade/ShaderToggler-compatible shader hashes observed in the capture.
+    List shader CRC32 hashes using recorded shader-object usage when available.
 
     Args:
         stage: Shader stage to inspect. Defaults to pixel. Use "all" to inspect all stages.
         event_id_min: Optional minimum event ID.
         event_id_max: Optional maximum event ID.
-        unique_only: If True, omit per-event rows and return only unique shaders.
-        limit: Optional maximum number of per-event rows to return.
+        unique_only: Omit events; unique_shaders summarizes the same bounded page.
+        limit: Maximum event-stage rows in a page, including unique_only mode.
+        method: auto prefers the usage index; usage_index never replays. A missing
+                index only permits bounded replay when BOTH event bounds exist.
+        max_events: At most 128 events may be replayed in one bounded page.
+        time_budget_ms: Cooperative work budget; one native getter cannot be cancelled.
+        cursor: Exact next_cursor returned by a previous page with the same query.
 
-    Returns CRC32 hashes computed from RenderDoc's shader reflection raw bytecode,
-    with both decimal and hex values. This does not require a modified RenderDoc build.
+    The indexed path hashes each shader once per request and performs zero
+    SetFrameEvent calls. It requires a driver recording shader-object usage,
+    such as the user's custom D3D12 build. Standard cores may return unsupported.
+    Check supported, complete, partial, coverage and diagnostics before treating
+    a result as exhaustive. A bounded replay leaves replay at its last event;
+    exceptions/cancellation never trigger restoration or another fallback.
     """
     params: dict[str, object] = {
         "stage": stage,
         "unique_only": unique_only,
+        "method": method,
+        "max_events": max_events,
+        "time_budget_ms": time_budget_ms,
+        "cursor": cursor,
     }
     if event_id_min is not None:
         params["event_id_min"] = event_id_min

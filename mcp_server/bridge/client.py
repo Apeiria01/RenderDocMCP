@@ -270,6 +270,29 @@ class RenderDocBridge:
     # Calls
     # ------------------------------------------------------------------
 
+    def _require_shader_hash_enumeration(self, target_pid):
+        """Never send a hash query to the old unbounded synchronous handler."""
+        info = {}
+        if target_pid is not None:
+            try:
+                with open(os.path.join(INSTANCES_DIR, str(target_pid), "info.json"),
+                          "r", encoding="utf-8") as stream:
+                    info = json.load(stream)
+            except (OSError, ValueError):
+                pass
+        if isinstance(info, dict):
+            protocol = info.get("protocol_version")
+            capabilities = info.get("capabilities")
+            revision = capabilities.get("shader_hash_enumeration") if isinstance(capabilities, dict) else None
+            if (type(protocol) is int and protocol >= 2 and
+                    type(revision) is int and revision >= 1):
+                return
+        raise RenderDocBridgeError(
+            "The selected RenderDoc extension lacks shader_hash_enumeration=1. "
+            "Reload the updated MCP Bridge extension before enumerating shader hashes. "
+            "No hash request was sent."
+        )
+
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Call a method on the selected RenderDoc instance."""
         with self._call_lock:
@@ -282,6 +305,8 @@ class RenderDocBridge:
             target_pid = self._resolve_target()
             if method in SAFE_SEARCH_METHODS:
                 self._require_safe_search(target_pid)
+            if method == "list_shader_hashes":
+                self._require_shader_hash_enumeration(target_pid)
             if target_pid is None:
                 return self._exchange(
                     method,

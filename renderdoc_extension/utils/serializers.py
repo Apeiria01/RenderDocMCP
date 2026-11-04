@@ -7,6 +7,8 @@ import struct
 
 import renderdoc as rd
 
+VARIABLE_SERIALIZER_REVISION = "shader-inspection-2"
+
 
 class Serializers:
     """Serialization utility functions (static methods)"""
