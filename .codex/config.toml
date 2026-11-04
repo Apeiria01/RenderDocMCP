@@ -1,4 +1,0 @@
-[mcp_servers.renderdoc]
-command = 'C:\Users\lyarluo\Desktop\RenderDocMCP\.venv\Scripts\renderdoc-mcp.exe'
-startup_timeout_sec = 60
-
