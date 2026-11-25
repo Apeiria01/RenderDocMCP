@@ -54,11 +54,17 @@ RenderDocMCP/
 | `get_draw_call_details` | 特定ドローコールの詳細 |
 | `get_action_timings` | アクションのGPU実行時間を取得 |
 | `get_shader_info` | シェーダーソース/定数バッファ |
-| `get_buffer_contents` | バッファデータ取得（オフセット/長さ指定可） |
+| `get_buffer_contents` | バッファデータ取得（オフセット/長さ指定可、`output_path` でファイル出力） |
 | `get_texture_info` | テクスチャメタデータ |
-| `get_texture_data` | テクスチャピクセルデータ取得（mip/slice/3Dスライス対応） |
+| `get_texture_data` | テクスチャピクセルデータ取得（mip/slice/3Dスライス対応、`output_path` でファイル出力） |
 | `get_pipeline_state` | パイプライン状態全体 |
 | `list_shader_hashes` | シェーダーバイトコードのCRC32 hash一覧 |
+| `get_dlssg_events` | RenderDoc fork の DLSS-G evaluate（入出力・カメラ・保存済み出力）と各 Present の出力元 |
+| `get_debug_capabilities` | シェーダーデバッグ/ピクセル履歴の対応状況（APIProperties） |
+| `debug_pixel` | 1ピクセルのピクセルシェーダーを命令単位でデバッグ |
+| `debug_vertex` | 1頂点の頂点シェーダーを命令単位でデバッグ |
+| `debug_thread` | 1スレッドのコンピュート（/メッシュ）シェーダーをデバッグ |
+| `pixel_history` | そのピクセルを書いた全フラグメントと却下したテスト |
 
 ### get_draw_calls フィルタリングオプション
 
@@ -115,6 +121,40 @@ get_action_timings(marker_filter="Camera.Render", exclude_markers=["GUI.Repaint"
 
 **注意**: GPUタイミングカウンターはハードウェア/ドライバーによっては利用できない場合があります。
 `available: false` が返された場合、そのキャプチャではタイミング情報を取得できません。
+
+### シェーダーデバッグ / ピクセル履歴 (`shader-debug-1`)
+
+```python
+# まず APIProperties の対応状況を確認（D3D11/D3D12 は対応、他APIは非対応の場合あり）
+get_debug_capabilities()
+
+# 1ピクセルのPSを命令単位でデバッグ
+debug_pixel(event_id=2479, x=960, y=540)
+debug_pixel(event_id=2479, x=960, y=540, primitive=12, sample=0)
+
+# 逐次記録を省いて最終変数値だけ（より多くのステップを実行できる）
+debug_pixel(event_id=2479, x=960, y=540, include_steps=False, max_steps=20000)
+
+debug_vertex(event_id=2479, vertex=3, instance=0)
+debug_thread(event_id=3100, group=[2, 0, 0], thread=[7, 7, 0])
+
+# そのピクセルを書いた全フラグメントと却下したテスト
+pixel_history(event_id=2479, x=960, y=540)
+```
+
+- 1リクエスト = 1トレース。同一replay callback内で `ContinueDebug` を回し切って
+  `FreeTrace` する。デバッグ後は `SetFrameEvent(event_id, True)` で指定イベントを
+  選び直す（replay状態が乱れるため。RenderDoc本体のshader viewerと同じ）。
+- `max_steps`（1–20000、既定512）と `time_budget_ms`（1–25000、既定8000）で有界。
+  長いシェーダーは完走せず打ち切られるので、`stop_reason` / `truncated` を見てから
+  `last_state` をシェーダー出力として扱うこと。
+- `supported: false` には必ず `reason` が付く（ピクセル非被覆、デバッグ情報なし、API非対応）。
+  `debug_info.debuggable` / `debug_info.debug_status` に反射情報側の理由が入る。
+- `shader_events` に NaN/Inf を生成したステップ番号がまとまる。
+- `x` / `y` は常に左上原点、対象mipの解像度。`debug_vertex` の `index` 省略時は
+  indexed drawなら index buffer 値 + baseVertex、そうでなければ vertex + vertexOffset。
+- BlockInvoke ではなく `AsyncInvoke`（replayキュー）で実行するため、UIを止めず
+  リクエストのキャンセル/期限が協調的に効く。
 
 ## 通信プロトコル
 

@@ -32,6 +32,7 @@ class RequestHandler:
             "get_api_events": self._handle_get_api_events,
             "get_action_context": self._handle_get_action_context,
             "get_resource_provenance": self._handle_get_resource_provenance,
+            "get_dlssg_events": self._handle_get_dlssg_events,
             "get_constant_buffers": self._handle_get_constant_buffers,
             "get_postvs_data": self._handle_get_postvs_data,
             "get_buffer_contents": self._handle_get_buffer_contents,
@@ -43,6 +44,11 @@ class RequestHandler:
             "list_shader_hashes": self._handle_list_shader_hashes,
             "list_captures": self._handle_list_captures,
             "open_capture": self._handle_open_capture,
+            "get_debug_capabilities": self._handle_get_debug_capabilities,
+            "debug_pixel": self._handle_debug_pixel,
+            "debug_vertex": self._handle_debug_vertex,
+            "debug_thread": self._handle_debug_thread,
+            "pixel_history": self._handle_pixel_history,
         }
 
     def handle(self, request):
@@ -73,16 +79,37 @@ class RequestHandler:
     def _handle_get_resource_provenance(self, params):
         return self.facade.get_resource_provenance(params["resource_ids"], params.get("max_chunks", 32))
 
+    def _handle_get_dlssg_events(self, params):
+        return self.facade.get_dlssg_events(params.get("max_evaluates", 64))
+
     _SEARCH_METHODS = frozenset((
         "find_draws_by_shader", "find_draws_by_texture",
         "find_draws_by_resource", "find_resource_usage",
         "list_shader_hashes",
     ))
 
+    # Shader debugging emulates the shader step by step, so it can take
+    # seconds: it runs on the replay queue, never through BlockInvoke.
+    _DEBUG_METHODS = frozenset((
+        "get_debug_capabilities", "debug_pixel", "debug_vertex",
+        "debug_thread", "pixel_history",
+    ))
+
     def handle_async(self, request, complete, control=None):
-        """Return True when a search owns the asynchronous response callback."""
+        """Return True when a search or debug trace owns the response callback."""
         method = request.get("method")
-        if method not in self._SEARCH_METHODS:
+        if method in self._SEARCH_METHODS:
+            schedule = (self.facade.shader_hashes_async if method == "list_shader_hashes"
+                        else self.facade.search_async)
+            dispatch = self._dispatch_search
+        elif method in self._DEBUG_METHODS:
+            # An extension reloaded from older sources has no debug_async;
+            # fall through to the synchronous table so the error names it.
+            schedule = getattr(self.facade, "debug_async", None)
+            if schedule is None:
+                return False
+            dispatch = self._dispatch_debug
+        else:
             return False
         request_id = request.get("id")
 
@@ -101,10 +128,8 @@ class RequestHandler:
             complete(response)
 
         try:
-            schedule = (self.facade.shader_hashes_async if method == "list_shader_hashes"
-                        else self.facade.search_async)
             schedule(
-                lambda service: self._dispatch_search(
+                lambda service: dispatch(
                     method, request.get("params", {}), service
                 ),
                 finished, request_control=control,
@@ -112,6 +137,61 @@ class RequestHandler:
         except Exception as exc:
             finished(None, exc)
         return True
+
+    _DEBUG_OPTIONS = ("max_steps", "time_budget_ms", "include_steps", "include_changes",
+                      "include_source", "include_variables", "include_constants",
+                      "include_source_mapping")
+
+    def _dispatch_debug(self, method, params, target=None):
+        """Forward only the keys the client sent; the service owns the defaults."""
+        target = target if target is not None else self.facade
+        if method == "get_debug_capabilities":
+            return target.get_debug_capabilities()
+        event_id = params.get("event_id")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        if method == "pixel_history":
+            options = self._present(params, (
+                "target_resource_id", "mip", "slice", "sample", "type_cast",
+                "max_events", "include_values"))
+            return target.pixel_history(event_id, self._required(params, "x"),
+                                        self._required(params, "y"), **options)
+        options = self._present(params, self._DEBUG_OPTIONS)
+        if method == "debug_pixel":
+            options.update(self._present(params, ("sample", "primitive", "view")))
+            return target.debug_pixel(event_id, self._required(params, "x"),
+                                      self._required(params, "y"), **options)
+        if method == "debug_vertex":
+            options.update(self._present(params, ("vertex", "instance", "index", "view")))
+            return target.debug_vertex(event_id, **options)
+        options.update(self._present(params, ("group", "thread", "mesh")))
+        return target.debug_thread(event_id, **options)
+
+    @staticmethod
+    def _present(params, names):
+        return {name: params[name] for name in names if params.get(name) is not None}
+
+    @staticmethod
+    def _required(params, name):
+        value = params.get(name)
+        if value is None:
+            raise ValueError("%s is required" % name)
+        return value
+
+    def _handle_get_debug_capabilities(self, params):
+        return self._dispatch_debug("get_debug_capabilities", params)
+
+    def _handle_debug_pixel(self, params):
+        return self._dispatch_debug("debug_pixel", params)
+
+    def _handle_debug_vertex(self, params):
+        return self._dispatch_debug("debug_vertex", params)
+
+    def _handle_debug_thread(self, params):
+        return self._dispatch_debug("debug_thread", params)
+
+    def _handle_pixel_history(self, params):
+        return self._dispatch_debug("pixel_history", params)
 
     def _dispatch_search(self, method, params, target=None):
         target = target if target is not None else self.facade
@@ -265,7 +345,8 @@ class RequestHandler:
         offset = params.get("offset", 0)
         length = params.get("length", 0)
         return self.facade.get_buffer_contents(
-            resource_id, offset, length, event_id=params.get("event_id")
+            resource_id, offset, length, event_id=params.get("event_id"),
+            output_path=params.get("output_path"),
         )
 
     def _handle_get_texture_info(self, params):
@@ -287,6 +368,7 @@ class RequestHandler:
         return self.facade.get_texture_data(
             resource_id, mip, slice_idx, sample, depth_slice,
             event_id=params.get("event_id"),
+            output_path=params.get("output_path"),
         )
 
     def _handle_get_output_merger_state(self, params):

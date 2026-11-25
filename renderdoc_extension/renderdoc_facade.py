@@ -8,6 +8,7 @@ import os
 
 from . import services as service_modules, utils as utility_modules
 from .services import inspection_service, pipeline_service, draw_metadata_service, shader_hash_service, context_service
+from .services import frame_generation_service, debug_service
 from .utils import inspection, serializers, draw_metadata
 from .services import (
     CaptureManager,
@@ -20,10 +21,24 @@ FACADE_REVISION = "shader-inspection-2"
 DRAW_METADATA_FACADE_REVISION = "draw-metadata-3"
 SHADER_HASH_FACADE_REVISION = "shader-hash-index-1"
 ACTION_CONTEXT_FACADE_REVISION = "action-context-1"
+FRAME_GENERATION_FACADE_REVISION = "dlssg-events-1"
+SHADER_DEBUG_FACADE_REVISION = "shader-debug-1"
 
 
 class _ShaderHashContextSnapshot:
     """Only UI-owned capture availability is needed for shader enumeration."""
+
+    def __init__(self, ctx):
+        self._loaded = ctx.IsCaptureLoaded()
+        if not self._loaded:
+            raise ValueError("No capture loaded")
+
+    def IsCaptureLoaded(self):
+        return self._loaded
+
+
+class _DebugContextSnapshot:
+    """Shader debugging needs only UI-owned capture availability."""
 
     def __init__(self, ctx):
         self._loaded = ctx.IsCaptureLoaded()
@@ -230,10 +245,11 @@ class RenderDocFacade:
 
     # ==================== Resource Operations ====================
 
-    def get_buffer_contents(self, resource_id, offset=0, length=0, event_id=None):
-        """Get buffer data, optionally immediately after a specific event."""
+    def get_buffer_contents(self, resource_id, offset=0, length=0, event_id=None,
+                            output_path=None):
+        """Get buffer data (base64, or a file with output_path), optionally after an event."""
         return self._resource.get_buffer_contents(
-            resource_id, offset, length, event_id=event_id
+            resource_id, offset, length, event_id=event_id, output_path=output_path
         )
 
     def get_texture_info(self, resource_id):
@@ -241,10 +257,11 @@ class RenderDocFacade:
         return self._resource.get_texture_info(resource_id)
 
     def get_texture_data(self, resource_id, mip=0, slice=0, sample=0, depth_slice=None,
-                         event_id=None):
-        """Get texture bytes, optionally immediately after a specific event."""
+                         event_id=None, output_path=None):
+        """Get texture bytes (base64, or a file with output_path), optionally after an event."""
         return self._resource.get_texture_data(
-            resource_id, mip, slice, sample, depth_slice, event_id=event_id
+            resource_id, mip, slice, sample, depth_slice, event_id=event_id,
+            output_path=output_path,
         )
 
     # ==================== Pipeline Operations ====================
@@ -269,10 +286,97 @@ class RenderDocFacade:
                 "module_path": os.path.abspath(__file__),
                 "capture_loaded": bool(self.ctx.IsCaptureLoaded()),
                 "features": ["constant_buffer_values", "typed_srv_formats",
-                             "sampler_descriptors", "bounded_postvs"],
+                             "sampler_descriptors", "bounded_postvs", "file_export"],
                 "feature_info": {"draw_metadata": self._draw_metadata_info(),
                                  "shader_hashes": self._shader_hash_info(),
-                                 "action_context": self._action_context_info()}}
+                                 "action_context": self._action_context_info(),
+                                 "frame_generation": self._frame_generation_info(),
+                                 "shader_debug": self._shader_debug_info()}}
+
+    # ==================== Shader Debugging ====================
+
+    def _shader_debug_info(self):
+        names = ("debug_pixel", "debug_vertex", "debug_thread", "pixel_history",
+                 "get_debug_capabilities")
+        service_class = getattr(debug_service, "DebugService", None)
+        available = all(callable(getattr(service_class, name, None)) for name in names)
+        service_current = getattr(service_modules, "debug_service", None) is debug_service
+        methods_current = all(
+            getattr(getattr(self, name, None), "__func__", None) is getattr(RenderDocFacade, name, None)
+            and getattr(getattr(RenderDocFacade, name, None), "__globals__", {}).get("debug_service") is debug_service
+            for name in names)
+        service_revision = getattr(debug_service, "DEBUG_SERVICE_REVISION", None)
+        return {"revision": SHADER_DEBUG_FACADE_REVISION, "available": available,
+                "service_revision": service_revision,
+                "facade_methods_current": methods_current,
+                "service_module_current": service_current,
+                "dependencies_coherent": bool(available and service_current and methods_current
+                                              and service_revision == SHADER_DEBUG_FACADE_REVISION),
+                "service_path": getattr(debug_service, "__file__", None),
+                "trace_lifetime": "one trace per request, freed inside the replay callback",
+                "replay_seeks": True}
+
+    def debug_async(self, debug_fn, complete, request_control=None):
+        """Run one bounded debug trace on the official replay queue.
+
+        Shader debugging can take seconds, so it must not hold the UI thread
+        through BlockInvoke. complete(result, error) runs on the replay thread.
+        """
+        snapshot = _DebugContextSnapshot(self.ctx)
+
+        def replay_work(controller):
+            try:
+                if request_control is not None:
+                    request_control.check_cancelled()
+                service = debug_service.DebugService(
+                    snapshot, lambda callback: callback(controller),
+                    request_control=request_control,
+                )
+                result = debug_fn(service)
+            except Exception as exc:
+                complete(None, exc)
+            else:
+                complete(result, None)
+
+        self.ctx.Replay().AsyncInvoke(replay_work)
+
+    def _debug(self):
+        """Compatibility entry point; normal IPC routes debugging asynchronously."""
+        return debug_service.DebugService(self.ctx, self._invoke)
+
+    def get_debug_capabilities(self):
+        return self._debug().get_debug_capabilities()
+
+    def debug_pixel(self, event_id, x, y, **options):
+        return self._debug().debug_pixel(event_id, x, y, **options)
+
+    def debug_vertex(self, event_id, **options):
+        return self._debug().debug_vertex(event_id, **options)
+
+    def debug_thread(self, event_id, **options):
+        return self._debug().debug_thread(event_id, **options)
+
+    def pixel_history(self, event_id, x, y, **options):
+        return self._debug().pixel_history(event_id, x, y, **options)
+
+    def _frame_generation_info(self):
+        service_class = getattr(frame_generation_service, "FrameGenerationService", None)
+        available = callable(getattr(service_class, "get_dlssg_events", None))
+        service_current = getattr(service_modules, "frame_generation_service", None) is frame_generation_service
+        method_current = (getattr(getattr(self, "get_dlssg_events", None), "__func__", None)
+                          is getattr(RenderDocFacade, "get_dlssg_events", None))
+        service_revision = getattr(frame_generation_service, "FRAME_GENERATION_REVISION", None)
+        return {"revision": FRAME_GENERATION_FACADE_REVISION, "available": available,
+                "service_revision": service_revision,
+                "dependencies_coherent": bool(available and service_current and method_current
+                                              and service_revision == FRAME_GENERATION_FACADE_REVISION),
+                "chunks": [frame_generation_service.EVALUATE_CHUNK,
+                           frame_generation_service.SAVED_OUTPUTS_CHUNK],
+                "service_path": getattr(frame_generation_service, "__file__", None),
+                "replay_seeks": False}
+
+    def get_dlssg_events(self, max_evaluates=64):
+        return frame_generation_service.FrameGenerationService(self.ctx, self._invoke).get_dlssg_events(max_evaluates)
 
     def _action_context_info(self):
         names = ("get_action_context", "get_resource_provenance")

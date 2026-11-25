@@ -7,6 +7,7 @@ import base64
 import renderdoc as rd
 
 from ..utils import Parsers, Helpers
+from ..utils import file_export
 
 
 class ResourceService:
@@ -45,14 +46,37 @@ class ResourceService:
 
         Helpers.select_event(controller, event_id)
 
-    def get_buffer_contents(self, resource_id, offset=0, length=0, event_id=None):
-        """Read buffer bytes, optionally immediately after a specific event."""
+    @staticmethod
+    def _event_tag(event_id):
+        return "e%d" % event_id if event_id is not None else "ecur"
+
+    @staticmethod
+    def _finish_read(result, output_path, default_name):
+        """Attach base64 bytes, or write them to output_path and attach file metadata.
+
+        The file is written after BlockInvoke returns, off the replay thread.
+        """
+        data = result.pop("raw")
+        if output_path is None:
+            result["data"]["content_base64"] = base64.b64encode(data).decode("ascii")
+        else:
+            result["data"].update(file_export.write_export(output_path, data, default_name))
+        return result["data"]
+
+    def get_buffer_contents(self, resource_id, offset=0, length=0, event_id=None,
+                            output_path=None):
+        """Read buffer bytes, optionally immediately after a specific event.
+
+        With output_path the raw bytes go to that file (or to an auto-named
+        file inside an existing directory) instead of content_base64.
+        """
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
         self._validate_event_id(event_id)
         self._validate_byte_range(offset, length)
-        result = {"data": None, "error": None}
+        file_export.validate_output_path(output_path)
+        result = {"data": None, "error": None, "raw": None}
 
         def callback(controller):
             # Resolve the buffer by numeric id. A ResourceId cannot be constructed
@@ -89,20 +113,23 @@ class ResourceService:
                 result["error"] = "Failed to read buffer: %s" % str(e)
                 return
 
+            result["raw"] = bytes(data)
             result["data"] = {
                 "resource_id": resource_id,
                 "event_id": event_id,
                 "length": len(data),
                 "total_size": buf_desc.length,
                 "offset": offset,
-                "content_base64": base64.b64encode(data).decode("ascii"),
             }
 
         self._invoke(callback)
 
         if result["error"]:
             raise ValueError(result["error"])
-        return result["data"]
+        default_name = "buffer_%s_%s_off%d_len%d.bin" % (
+            Parsers.extract_numeric_id(resource_id), self._event_tag(event_id),
+            offset, result["data"]["length"])
+        return self._finish_read(result, output_path, default_name)
 
     def get_texture_info(self, resource_id):
         """Get texture metadata"""
@@ -142,13 +169,18 @@ class ResourceService:
         return result["texture"]
 
     def get_texture_data(self, resource_id, mip=0, slice=0, sample=0, depth_slice=None,
-                         event_id=None):
-        """Read texture bytes, optionally immediately after a specific event."""
+                         event_id=None, output_path=None):
+        """Read texture bytes, optionally immediately after a specific event.
+
+        With output_path the raw bytes go to that file (or to an auto-named
+        file inside an existing directory) instead of content_base64.
+        """
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
         self._validate_event_id(event_id)
-        result = {"data": None, "error": None}
+        file_export.validate_output_path(output_path)
+        result = {"data": None, "error": None, "raw": None}
 
         def callback(controller):
             tex_desc = self._find_texture_by_id(controller, resource_id)
@@ -227,6 +259,7 @@ class ResourceService:
                 data = data[slice_start:slice_end]
                 output_depth = 1
 
+            result["raw"] = bytes(data)
             result["data"] = {
                 "resource_id": resource_id,
                 "event_id": event_id,
@@ -242,11 +275,14 @@ class ResourceService:
                 "is_3d": is_3d,
                 "total_depth": mip_depth if is_3d else 1,
                 "data_length": len(data),
-                "content_base64": base64.b64encode(data).decode("ascii"),
             }
 
         self._invoke(callback)
 
         if result["error"]:
             raise ValueError(result["error"])
-        return result["data"]
+        default_name = "texture_%s_%s_mip%d_slice%d%s%s.bin" % (
+            Parsers.extract_numeric_id(resource_id), self._event_tag(event_id), mip, slice,
+            "_sample%d" % sample if sample else "",
+            "_z%d" % depth_slice if depth_slice is not None else "")
+        return self._finish_read(result, output_path, default_name)

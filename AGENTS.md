@@ -56,11 +56,17 @@ RenderDocMCP/
 | `get_bridge_info` | 読み込み済み拡張の inspection revision と module path |
 | `get_constant_buffers` | 単一イベントの定数実値/root constants と有界 raw bytes |
 | `get_postvs_data` | 単一 draw/instance/view の MeshFormat と有界 PostVS bytes |
-| `get_buffer_contents` | バッファデータ取得（オフセット/長さ指定可） |
+| `get_buffer_contents` | バッファデータ取得（オフセット/長さ指定可、`output_path` でファイル出力） |
 | `get_texture_info` | テクスチャメタデータ |
-| `get_texture_data` | テクスチャピクセルデータ取得（mip/slice/3Dスライス対応） |
+| `get_texture_data` | テクスチャピクセルデータ取得（mip/slice/3Dスライス対応、`output_path` でファイル出力） |
 | `get_pipeline_state` | パイプライン状態全体 |
 | `list_shader_hashes` | シェーダーバイトコードのCRC32 hash一覧 |
+| `get_dlssg_events` | RenderDoc fork の DLSS-G evaluate（入出力・カメラ・保存済み出力）と各 Present の出力元 |
+| `get_debug_capabilities` | シェーダーデバッグ/ピクセル履歴の対応状況（APIProperties） |
+| `debug_pixel` | 1ピクセルのピクセルシェーダーを命令単位でデバッグ |
+| `debug_vertex` | 1頂点の頂点シェーダーを命令単位でデバッグ |
+| `debug_thread` | 1スレッドのコンピュート（/メッシュ）シェーダーをデバッグ |
+| `pixel_history` | そのピクセルを書いた全フラグメントと却下したテスト |
 
 ### get_draw_calls フィルタリングオプション
 

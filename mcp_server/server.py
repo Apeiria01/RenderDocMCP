@@ -3,7 +3,8 @@ RenderDoc MCP Server
 FastMCP 2.0 server providing access to RenderDoc capture data.
 """
 
-from typing import Annotated, Literal
+import json
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from pydantic import Field, StrictBool, StrictInt, StrictStr
@@ -18,6 +19,48 @@ mcp = FastMCP(
 
 # RenderDoc bridge client
 bridge = RenderDocBridge(host=settings.renderdoc_host, port=settings.renderdoc_port)
+
+# Tools that can write their payload to a file instead of base64.
+FILE_EXPORT_METHODS = frozenset({"get_texture_data", "get_buffer_contents"})
+
+
+def _stdio_message_bytes(result: Any) -> int:
+    """Estimate the JSON-RPC line FastMCP writes for this tool result.
+
+    FastMCP 2.x sends a dict result twice: as content[0].text (the JSON,
+    escaped once more inside a JSON string) and again as structuredContent.
+    """
+    body = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+    return len(json.dumps(body, ensure_ascii=False).encode("utf-8")) + len(body.encode("utf-8"))
+
+
+def _call(method: str, params: dict | None = None) -> Any:
+    """Call the extension, refusing results that would overflow the stdio transport.
+
+    Without this check an oversized result makes the MCP client drop the whole
+    connection (and with it the select_instance choice) instead of failing one call.
+    """
+    params = params or {}
+    result = bridge.call(method, params)
+    if params.get("output_path") is not None and (
+            not isinstance(result, dict) or "output_path" not in result
+            or "content_base64" in result):
+        raise RenderDocBridgeError(
+            "The RenderDoc extension ignored output_path (it predates file export). "
+            "Sync renderdoc_extension into %APPDATA%\\qrenderdoc\\extensions\\"
+            "renderdoc_mcp_bridge, restart RenderDoc and reopen the capture.")
+    limit = settings.max_response_bytes
+    size = _stdio_message_bytes(result)
+    if size > limit:
+        hint = ("Pass output_path (an absolute file path, or an existing directory "
+                "for an auto-named file) so RenderDoc writes the raw bytes to disk and "
+                "only metadata is returned." if method in FILE_EXPORT_METHODS else
+                "Narrow the request (smaller max_bytes, event range or result limit).")
+        raise RenderDocBridgeError(
+            "%s result would be a %.1f MB MCP stdio message, over the %.1f MB budget "
+            "(the client disconnects above 16 MB, and FastMCP sends a dict result "
+            "twice). %s" % (method, size / 1e6, limit / 1e6, hint))
+    return result
 
 
 @mcp.tool
@@ -56,7 +99,7 @@ def get_capture_status() -> dict:
     Check if a capture is currently loaded in RenderDoc.
     Returns the capture status and API type if loaded.
     """
-    return bridge.call("get_capture_status")
+    return _call("get_capture_status")
 
 
 @mcp.tool
@@ -72,7 +115,7 @@ def get_bookmarks() -> dict:
 
     Bookmarks are saved inside the .rdc capture, so they persist across sessions.
     """
-    return bridge.call("get_bookmarks")
+    return _call("get_bookmarks")
 
 
 @mcp.tool
@@ -113,7 +156,7 @@ def get_draw_calls(
         params["only_actions"] = only_actions
     if flags_filter is not None:
         params["flags_filter"] = flags_filter
-    return bridge.call("get_draw_calls", params)
+    return _call("get_draw_calls", params)
 
 
 @mcp.tool
@@ -128,7 +171,7 @@ def get_frame_summary() -> dict:
     - Top-level markers with event IDs and child counts
     - Resource counts: textures, buffers
     """
-    return bridge.call("get_frame_summary")
+    return _call("get_frame_summary")
 
 
 @mcp.tool
@@ -153,7 +196,7 @@ def find_draws_by_shader(
     event_id_min with the original upper bound. Never interpret partial matches
     as a complete result. max_results limits the returned page (1-10000).
     """
-    return bridge.call("find_draws_by_shader", {
+    return _call("find_draws_by_shader", {
         "shader_name": shader_name, "stage": stage,
         "event_id_min": event_id_min, "event_id_max": event_id_max,
         "max_results": max_results, "max_events": max_events,
@@ -178,7 +221,7 @@ def find_draws_by_texture(
     Resume a partial page with event_id_min=next_event_id. To include copies,
     clears and resolves, resolve the resource ID and use find_resource_usage.
     """
-    return bridge.call("find_draws_by_texture", {
+    return _call("find_draws_by_texture", {
         "texture_name": texture_name, "event_id_min": event_id_min,
         "event_id_max": event_id_max, "max_results": max_results,
     })
@@ -205,7 +248,7 @@ def find_draws_by_resource(
     Resume partial results using next_event_id as event_id_min. Use
     find_resource_usage for copy/clear/resolve events of a texture or buffer.
     """
-    return bridge.call("find_draws_by_resource", {
+    return _call("find_draws_by_resource", {
         "resource_id": resource_id, "event_id_min": event_id_min,
         "event_id_max": event_id_max, "max_results": max_results,
         "max_events": max_events, "time_budget_ms": time_budget_ms,
@@ -228,7 +271,7 @@ def find_resource_usage(
     Resume partial results with event_id_min=next_event_id. Usage index coverage
     may omit dynamic bindless uses and is not proof of per-pixel GPU access.
     """
-    return bridge.call("find_resource_usage", {
+    return _call("find_resource_usage", {
         "resource_id": resource_id, "event_id_min": event_id_min,
         "event_id_max": event_id_max, "max_results": max_results,
     })
@@ -244,7 +287,7 @@ def get_draw_call_details(event_id: int) -> dict:
 
     Includes vertex/index counts, resource outputs, and other metadata.
     """
-    return bridge.call("get_draw_call_details", {"event_id": event_id})
+    return _call("get_draw_call_details", {"event_id": event_id})
 
 
 @mcp.tool
@@ -278,13 +321,13 @@ def get_action_timings(
         params["marker_filter"] = marker_filter
     if exclude_markers is not None:
         params["exclude_markers"] = exclude_markers
-    return bridge.call("get_action_timings", params)
+    return _call("get_action_timings", params)
 
 
 @mcp.tool
 def get_bridge_info() -> dict:
     """Read the loaded extension's inspection revision and module path (not disk version)."""
-    return bridge.call("get_bridge_info", {})
+    return _call("get_bridge_info", {})
 
 
 @mcp.tool
@@ -310,7 +353,7 @@ def get_rasterizer_state(
     Resource/chunk/child/depth/time/JSON bounds cannot hard-cancel a native getter.
     API failures terminate without restore, retry or hidden fallback.
     """
-    return bridge.call("get_rasterizer_state", {"event_id": event_id})
+    return _call("get_rasterizer_state", {"event_id": event_id})
 
 
 @mcp.tool
@@ -332,7 +375,7 @@ def get_shader_artifact(
     No other shader stages, texture/buffer reads or shader replacement occur.
     Output bounds do not limit the driver's internal cost of one native getter.
     """
-    return bridge.call("get_shader_artifact", {
+    return _call("get_shader_artifact", {
         "event_id": event_id, "stage": stage, "max_bytes": max_bytes,
         "disassembly_target": disassembly_target, "max_text_bytes": max_text_bytes,
     })
@@ -354,7 +397,7 @@ def get_api_events(
     Missing chunks, duplicate/conflicting events and limits remain explicit.
     A returned EID alone is not proof of an exact before-draw replay boundary.
     """
-    return bridge.call("get_api_events", {
+    return _call("get_api_events", {
         "event_id_min": event_id_min, "event_id_max": event_id_max,
         "max_events": max_events,
     })
@@ -380,7 +423,7 @@ def get_action_context(
     with action/event/SD child/depth/time/JSON limits. No SetFrameEvent, buffer
     reads, capture writes, or state restoration; native errors propagate.
     """
-    return bridge.call("get_action_context", {"event_id": event_id,
+    return _call("get_action_context", {"event_id": event_id,
         "before_actions": before_actions, "after_actions": after_actions,
         "max_events": max_events})
 
@@ -401,8 +444,31 @@ def get_resource_provenance(
     One metadata-only replay callback, zero SetFrameEvent, bounded resources,
     relations/chunks/SD children/depth/time/JSON; errors stop without retry.
     """
-    return bridge.call("get_resource_provenance", {"resource_ids": resource_ids,
+    return _call("get_resource_provenance", {"resource_ids": resource_ids,
         "max_chunks": max_chunks})
+
+
+@mcp.tool
+def get_dlssg_events(
+    max_evaluates: Annotated[StrictInt, Field(ge=1, le=256)] = 64,
+) -> dict:
+    """List DLSS Frame Generation (NGX) evaluates recorded by the RenderDoc fork.
+
+    Requires feature_info.frame_generation revision dlssg-events-1. The fork
+    records NVSDK_NGX_D3D12_EvaluateFeature as chunk NGX::DLSSG_Evaluate, shown
+    as a Copy action "DLSS-G Evaluate #N (i/n)"; upstream RenderDoc has none.
+    Per evaluate: event_id, eval_seq, NGX result, multi-frame index/count,
+    reset, every input/output role (Backbuffer, Depth, MotionVectors, HUDLess,
+    UI, UIAlpha, BidirectionalDistortionField, OutputInterpolated, OutputReal,
+    OutputDisableInterpolation) with ResourceId + name, all camera/flag
+    parameters, and the outputs saved by Internal::DLSSG_SavedOutputs (sizes
+    only, image bytes never read). Also lists every Present with the last copy
+    into the presented image and its DLSS-G role when an earlier evaluate in
+    this capture names that source. evaluate_count=0 means no evaluate was
+    submitted inside the captured present interval, not that DLSS-G was off.
+    One metadata-only replay callback, zero SetFrameEvent.
+    """
+    return _call("get_dlssg_events", {"max_evaluates": max_evaluates})
 
 
 @mcp.tool
@@ -423,7 +489,7 @@ def get_constant_buffers(
     Nonfinite floats use NaN/+Infinity/-Infinity strings with raw value bits.
     Replay remains at event_id; the GUI selection is not changed. No capture writes.
     """
-    return bridge.call("get_constant_buffers", {
+    return _call("get_constant_buffers", {
         "event_id": event_id, "stage": stage, "block_index": block_index,
         "array_element": array_element, "max_bytes": max_bytes,
     })
@@ -448,7 +514,7 @@ def get_postvs_data(
     Replay remains at event_id; GUI selection is not changed. Driver/runtime
     limitations may return supported=false or complete=false with reason.
     """
-    return bridge.call("get_postvs_data", {
+    return _call("get_postvs_data", {
         "event_id": event_id, "instance": instance, "view": view,
         "stage": stage, "max_bytes": max_bytes,
     })
@@ -468,7 +534,7 @@ def get_shader_info(
 
     Returns shader disassembly, constant buffer values, and resource bindings.
     """
-    return bridge.call("get_shader_info", {"event_id": event_id, "stage": stage})
+    return _call("get_shader_info", {"event_id": event_id, "stage": stage})
 
 
 @mcp.tool
@@ -477,6 +543,7 @@ def get_buffer_contents(
     offset: StrictInt = 0,
     length: StrictInt = 0,
     event_id: StrictInt | None = None,
+    output_path: StrictStr | None = None,
 ) -> dict:
     """
     Read the contents of a buffer resource.
@@ -488,14 +555,24 @@ def get_buffer_contents(
         event_id: Optional positive event ID. When provided, replay to immediately
                   after this event and read the buffer in one replay callback.
                   Omit to read the existing replay state without moving it.
+        output_path: Optional absolute path on the machine running RenderDoc.
+                     The raw bytes are written there (an existing directory, or a
+                     path ending in a separator, gets an auto-named .bin; parent
+                     directories are created; an existing file is replaced).
 
-    Returns base64-encoded bytes and metadata, including event_id (null when omitted).
-    The selected replay state remains at event_id. This does not change the GUI selection.
+    Returns base64-encoded bytes (content_base64) and metadata, including event_id
+    (null when omitted). With output_path, content_base64 is omitted and
+    output_path, bytes_written and sha256 describe the written file instead.
+    A result that would exceed ~15 MB on the MCP stdio transport is refused
+    (use output_path). The selected replay state remains at event_id.
+    This does not change the GUI selection.
     """
     params = {"resource_id": resource_id, "offset": offset, "length": length}
     if event_id is not None:
         params["event_id"] = event_id
-    return bridge.call("get_buffer_contents", params)
+    if output_path is not None:
+        params["output_path"] = output_path
+    return _call("get_buffer_contents", params)
 
 
 @mcp.tool
@@ -508,7 +585,7 @@ def get_texture_info(resource_id: str) -> dict:
 
     Includes dimensions, format, mip levels, and other properties.
     """
-    return bridge.call("get_texture_info", {"resource_id": resource_id})
+    return _call("get_texture_info", {"resource_id": resource_id})
 
 
 @mcp.tool
@@ -519,6 +596,7 @@ def get_texture_data(
     sample: int = 0,
     depth_slice: int | None = None,
     event_id: StrictInt | None = None,
+    output_path: StrictStr | None = None,
 ) -> dict:
     """
     Read the pixel data of a texture resource.
@@ -534,17 +612,27 @@ def get_texture_data(
         event_id: Optional positive event ID. When provided, replay to immediately
                   after this event and read the texture in one replay callback.
                   Omit to read the existing replay state without moving it.
+        output_path: Optional absolute path on the machine running RenderDoc.
+                     The raw bytes are written there (an existing directory, or a
+                     path ending in a separator, gets an auto-named .bin; parent
+                     directories are created; an existing file is replaced).
 
-    Returns raw texture bytes as base64 (not a PNG), dimensions, format and event_id
-    (null when omitted). The selected replay state remains at event_id.
-    This does not change the GUI selection.
+    Returns raw texture bytes as base64 (content_base64, not a PNG), dimensions,
+    format, data_length and event_id (null when omitted). With output_path,
+    content_base64 is omitted and output_path, bytes_written and sha256 describe
+    the written file instead. Base64 results over ~15 MB on the MCP stdio
+    transport are refused, i.e. above roughly 5.6 MB of raw texture data
+    (1920x1080 RGBA8 is 8.3 MB): use output_path for full-resolution reads.
+    The selected replay state remains at event_id. This does not change the GUI selection.
     """
     params = {"resource_id": resource_id, "mip": mip, "slice": slice, "sample": sample}
     if depth_slice is not None:
         params["depth_slice"] = depth_slice
     if event_id is not None:
         params["event_id"] = event_id
-    return bridge.call("get_texture_data", params)
+    if output_path is not None:
+        params["output_path"] = output_path
+    return _call("get_texture_data", params)
 
 
 @mcp.tool
@@ -570,7 +658,7 @@ def get_output_merger_state(event_id: StrictInt) -> dict:
     For depth pixels, pass depth_target.resource_id, first_mip and first_slice to
     get_texture_data with the SAME event_id (choose an MSAA sample explicitly).
     """
-    return bridge.call("get_output_merger_state", {"event_id": event_id})
+    return _call("get_output_merger_state", {"event_id": event_id})
 
 
 @mcp.tool
@@ -591,7 +679,7 @@ def get_pipeline_state(event_id: StrictInt) -> dict:
     - D3D11/D3D12 output_merger: DSV/RTVs, depth/stencil and blending
     - Viewports and input assembly state
     """
-    return bridge.call("get_pipeline_state", {"event_id": event_id})
+    return _call("get_pipeline_state", {"event_id": event_id})
 
 
 @mcp.tool
@@ -610,7 +698,7 @@ def list_set_render_targets() -> dict:
     how render targets differ between the marked geometry/UI passes and the
     post-processing / composite steps between them.
     """
-    return bridge.call("list_set_render_targets", {})
+    return _call("list_set_render_targets", {})
 
 
 @mcp.tool
@@ -661,7 +749,233 @@ def list_shader_hashes(
         params["event_id_max"] = event_id_max
     if limit is not None:
         params["limit"] = limit
-    return bridge.call("list_shader_hashes", params)
+    return _call("list_shader_hashes", params)
+
+
+@mcp.tool
+def get_debug_capabilities() -> dict:
+    """
+    Report whether this capture can be shader-debugged at all.
+
+    Reads APIProperties on the replay thread: shader_debugging and pixel_history
+    are the capture's own capability bits, so check them before spending a
+    debug_pixel / pixel_history call. Also reports the API, GPU vendor, whether
+    the replay is degraded, and which Debug* methods this RenderDoc runtime
+    exposes. D3D11 (DXBC) and D3D12 (DXBC/DXIL) support debugging; other APIs
+    may not. No replay seek is performed.
+    """
+    return _call("get_debug_capabilities")
+
+
+@mcp.tool
+def debug_pixel(
+    event_id: StrictInt,
+    x: StrictInt,
+    y: StrictInt,
+    sample: StrictInt | None = None,
+    primitive: StrictInt | None = None,
+    view: StrictInt | None = None,
+    max_steps: Annotated[StrictInt, Field(ge=1, le=20000)] = 512,
+    time_budget_ms: Annotated[StrictInt, Field(ge=1, le=25000)] = 8000,
+    include_steps: StrictBool = True,
+    include_changes: StrictBool = True,
+    include_source: StrictBool = True,
+    include_variables: StrictBool = True,
+    include_constants: StrictBool = False,
+    include_source_mapping: StrictBool = False,
+) -> dict:
+    """
+    Run RenderDoc's pixel shader debugger on one pixel of one draw.
+
+    Emulates the fragment that wrote (x, y) at event_id, instruction by
+    instruction (ReplayController.DebugPixel + ContinueDebug + FreeTrace).
+
+    Args:
+        event_id: A draw (Drawcall) event ID. Non-draw events are rejected.
+        x, y: Pixel coordinates in the bound render target, ALWAYS top-left
+              origin, in the target's own mip resolution.
+        sample: MSAA sample index; omit for no preference.
+        primitive: Debug the fragment from this primitive when several cover
+                   the pixel; omit to let RenderDoc pick one.
+        view: Multiview/layered view index; omit for no preference.
+        max_steps: Stop after this many emulated steps (truncated result).
+        time_budget_ms: Cooperative wall-clock budget between ContinueDebug
+                        batches; a single batch cannot be interrupted. The IPC
+                        request deadline (30 s) still applies.
+        include_steps: Return the per-step list. Set False to run further for
+                       the same byte budget and keep only last_state.
+        include_changes: Include per-step variable before/after values.
+        include_source: Include the HLSL/disassembly line for each step.
+        include_variables: Include last_state.variables, every mutable variable
+                           accumulated up to the last executed step.
+        include_constants: Include the trace's constant-buffer variables (large).
+        include_source_mapping: Include the source-variable mapping table.
+
+    Returns supported/complete/truncated/stop_reason, the trace's inputs,
+    debug_info (debuggable, debug_status, source files), steps, last_state and
+    shader_events (step indices that generated NaN/Inf, sample/load/gather
+    counts). supported=false with a reason means the pixel was not covered, the
+    shader has no debug info, or the API cannot debug - never a silent empty
+    trace. A long shader is truncated, not run to completion: check
+    stop_reason before trusting last_state as the shader's output.
+    Replay is re-selected at event_id afterwards; the GUI selection is unchanged.
+    """
+    params: dict[str, object] = {
+        "event_id": event_id, "x": x, "y": y,
+        "max_steps": max_steps, "time_budget_ms": time_budget_ms,
+        "include_steps": include_steps, "include_changes": include_changes,
+        "include_source": include_source, "include_variables": include_variables,
+        "include_constants": include_constants,
+        "include_source_mapping": include_source_mapping,
+    }
+    for name, value in (("sample", sample), ("primitive", primitive), ("view", view)):
+        if value is not None:
+            params[name] = value
+    return _call("debug_pixel", params)
+
+
+@mcp.tool
+def debug_vertex(
+    event_id: StrictInt,
+    vertex: StrictInt = 0,
+    instance: StrictInt = 0,
+    index: StrictInt | None = None,
+    view: StrictInt = 0,
+    max_steps: Annotated[StrictInt, Field(ge=1, le=20000)] = 512,
+    time_budget_ms: Annotated[StrictInt, Field(ge=1, le=25000)] = 8000,
+    include_steps: StrictBool = True,
+    include_changes: StrictBool = True,
+    include_source: StrictBool = True,
+    include_variables: StrictBool = True,
+    include_constants: StrictBool = False,
+    include_source_mapping: StrictBool = False,
+) -> dict:
+    """
+    Run RenderDoc's vertex shader debugger on one vertex of one draw.
+
+    Args:
+        event_id: A draw (Drawcall) event ID.
+        vertex: 0-based vertex within the draw (not the index buffer value).
+        instance: 0-based instance within the draw.
+        index: The vertex-input index. Omitted, it is resolved like RenderDoc's
+               mesh viewer: for an indexed draw the index buffer entry at
+               indexOffset+vertex plus baseVertex (clamped at 0), otherwise
+               vertex+vertexOffset. vertex_lookup in the result reports which
+               rule was used and the raw index that was read.
+        view: Multiview viewport index.
+
+    Other arguments and the result shape match debug_pixel. For vertex outputs
+    across a whole draw use get_postvs_data instead; this tool is for stepping
+    one invocation. Replay is re-selected at event_id afterwards.
+    """
+    params: dict[str, object] = {
+        "event_id": event_id, "vertex": vertex, "instance": instance, "view": view,
+        "max_steps": max_steps, "time_budget_ms": time_budget_ms,
+        "include_steps": include_steps, "include_changes": include_changes,
+        "include_source": include_source, "include_variables": include_variables,
+        "include_constants": include_constants,
+        "include_source_mapping": include_source_mapping,
+    }
+    if index is not None:
+        params["index"] = index
+    return _call("debug_vertex", params)
+
+
+@mcp.tool
+def debug_thread(
+    event_id: StrictInt,
+    group: list[StrictInt] | None = None,
+    thread: list[StrictInt] | None = None,
+    mesh: StrictBool = False,
+    max_steps: Annotated[StrictInt, Field(ge=1, le=20000)] = 512,
+    time_budget_ms: Annotated[StrictInt, Field(ge=1, le=25000)] = 8000,
+    include_steps: StrictBool = True,
+    include_changes: StrictBool = True,
+    include_source: StrictBool = True,
+    include_variables: StrictBool = True,
+    include_constants: StrictBool = False,
+    include_source_mapping: StrictBool = False,
+) -> dict:
+    """
+    Run RenderDoc's compute shader debugger on one thread of one dispatch.
+
+    Args:
+        event_id: A Dispatch event ID (any action when mesh=True).
+        group: 3D workgroup index [x, y, z], default [0, 0, 0]. Validated
+               against the dispatch's recorded dimensions when available.
+        thread: 3D thread index within the group, default [0, 0, 0].
+        mesh: Debug a mesh/amplification shader thread (DebugMeshThread)
+              instead of a compute thread. Fails if the runtime lacks it.
+
+    Other arguments and the result shape match debug_pixel.
+    Replay is re-selected at event_id afterwards.
+    """
+    params: dict[str, object] = {
+        "event_id": event_id, "mesh": mesh,
+        "max_steps": max_steps, "time_budget_ms": time_budget_ms,
+        "include_steps": include_steps, "include_changes": include_changes,
+        "include_source": include_source, "include_variables": include_variables,
+        "include_constants": include_constants,
+        "include_source_mapping": include_source_mapping,
+    }
+    if group is not None:
+        params["group"] = group
+    if thread is not None:
+        params["thread"] = thread
+    return _call("debug_thread", params)
+
+
+@mcp.tool
+def pixel_history(
+    event_id: StrictInt,
+    x: StrictInt,
+    y: StrictInt,
+    target_resource_id: StrictStr | None = None,
+    mip: StrictInt | None = None,
+    slice: StrictInt | None = None,
+    sample: StrictInt = 0,
+    type_cast: StrictStr | None = None,
+    max_events: Annotated[StrictInt, Field(ge=1, le=4096)] = 256,
+    include_values: StrictBool = True,
+) -> dict:
+    """
+    List every fragment that touched one pixel of a texture, up to an event.
+
+    This answers "why is this pixel this color": each entry reports the event,
+    primitive and fragment, the value before (pre_mod), what the pixel shader
+    returned (shader_out), the value after (post_mod), and which test discarded
+    the fragment (failed_tests: depth_test_failed, shader_discarded,
+    backface_culled, scissor_clipped, stencil_test_failed, ...).
+
+    Args:
+        event_id: The event to look back from. Replay is selected here first,
+                  so later events are not included.
+        x, y: Pixel coordinates, top-left origin, in the chosen mip's
+              resolution. Out-of-range coordinates are rejected up front.
+        target_resource_id: Texture to inspect. Omitted, the first bound render
+                            target at this event is used (its firstMip and
+                            firstSlice become the default subresource).
+        mip, slice, sample: Subresource to inspect.
+        type_cast: Optional CompType name (e.g. "UNorm", "Float") to
+                   reinterpret the texture's format.
+        max_events: Cap on returned modifications (count reports the total).
+        include_values: Set False to drop pre_mod/shader_out/post_mod values
+                        and keep only the events and test outcomes.
+
+    Returns supported (APIProperties.pixelHistory), target metadata, count /
+    returned / truncated, modifications and passed_event_ids - the events whose
+    fragment actually wrote the pixel. For depth targets read pre_mod.depth /
+    post_mod.depth; color lives in color_float/color_uint/color_int.
+    """
+    params: dict[str, object] = {
+        "event_id": event_id, "x": x, "y": y, "sample": sample,
+        "max_events": max_events, "include_values": include_values,
+    }
+    for name, value in (("target_resource_id", target_resource_id), ("mip", mip),
+                        ("slice", slice), ("type_cast", type_cast)):
+        if value is not None:
+            params[name] = value
+    return _call("pixel_history", params)
 
 
 @mcp.tool
@@ -678,7 +992,7 @@ def list_captures(directory: str) -> dict:
     - size_bytes: File size in bytes
     - modified_time: Last modified timestamp (ISO format)
     """
-    return bridge.call("list_captures", {"directory": directory})
+    return _call("list_captures", {"directory": directory})
 
 
 @mcp.tool
@@ -692,7 +1006,7 @@ def open_capture(capture_path: str) -> dict:
     Returns success status and information about the opened capture.
     Note: This will close any currently open capture.
     """
-    return bridge.call("open_capture", {"capture_path": capture_path})
+    return _call("open_capture", {"capture_path": capture_path})
 
 
 def main():

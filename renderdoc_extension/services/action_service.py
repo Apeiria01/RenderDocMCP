@@ -72,6 +72,8 @@ class ActionService:
                 "copies": 0,
                 "presents": 0,
                 "markers": 0,
+                # RenderDoc fork: NGX DLSS Frame Generation evaluates (see get_dlssg_events)
+                "dlssg_evaluates": 0,
             }
             total_actions = [0]
 
@@ -88,6 +90,8 @@ class ActionService:
                         stats["clears"] += 1
                     if flags & rd.ActionFlags.Copy:
                         stats["copies"] += 1
+                        if str(getattr(action, "customName", "")).startswith("DLSS-G Evaluate"):
+                            stats["dlssg_evaluates"] += 1
                     if flags & rd.ActionFlags.Present:
                         stats["presents"] += 1
                     if flags & (rd.ActionFlags.PushMarker | rd.ActionFlags.SetMarker):

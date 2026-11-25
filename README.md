@@ -42,9 +42,9 @@ files after checking the original SHA-256 manifest, then use the official
 `pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")` reload. Disk test
 success and version strings do not establish that a live capture has loaded it.
 
-RenderDoc UI拡張機能として動作するMCPサーバー。AIアシスタントがRenderDocのキャプチャデータにアクセスし、グラフィックスデバッグを支援する。
+作为 RenderDoc UI 扩展运行的 MCP 服务器。让 AI 助手能够访问 RenderDoc 的捕获数据，协助图形调试。
 
-## アーキテクチャ
+## 架构
 
 ```
 Claude/AI Client (stdio)
@@ -56,41 +56,41 @@ MCP Server Process (Python + FastMCP 2.0)
 RenderDoc Process (Extension)
 ```
 
-RenderDoc内蔵のPythonにはsocketモジュールがないため、ファイルベースのIPCで通信を行う。
+RenderDoc 内置的 Python 没有 socket 模块，因此改用基于文件的 IPC 通信。
 
-## セットアップ
+## 安装与配置
 
-### 1. RenderDoc拡張機能のインストール
+### 1. 安装 RenderDoc 扩展
 
 ```bash
 python scripts/install_extension.py
 ```
 
-拡張機能は `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge` にインストールされる。
+扩展会被安装到 `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge`。
 
-### 2. RenderDocで拡張機能を有効化
+### 2. 在 RenderDoc 中启用扩展
 
-1. RenderDocを起動
+1. 启动 RenderDoc
 2. Tools > Manage Extensions
-3. "RenderDoc MCP Bridge" を有効化
+3. 勾选启用 "RenderDoc MCP Bridge"
 
-### 3. MCPサーバーのインストール
+### 3. 安装 MCP 服务器
 
 ```bash
 uv tool install
-uv tool update-shell  # PATHに追加
+uv tool update-shell  # 加入 PATH
 ```
 
-シェルを再起動すると `renderdoc-mcp` コマンドが使えるようになる。
+重启 shell 后即可使用 `renderdoc-mcp` 命令。
 
-> **Note**: `--editable` を付けると、ソースコードの変更が即座に反映される（開発時に便利）。
-> 安定版としてインストールする場合は `uv tool install .` を使用。
+> **注意**: 加上 `--editable` 后，源码改动会立即生效（开发时方便）。
+> 若要按稳定版安装，使用 `uv tool install .`。
 
-### 4. MCPクライアントの設定
+### 4. 配置 MCP 客户端
 
 #### Claude Desktop
 
-`claude_desktop_config.json` に追加:
+添加到 `claude_desktop_config.json`:
 
 ```json
 {
@@ -104,7 +104,7 @@ uv tool update-shell  # PATHに追加
 
 #### Claude Code
 
-`.mcp.json` に追加:
+添加到 `.mcp.json`:
 
 ```json
 {
@@ -116,26 +116,121 @@ uv tool update-shell  # PATHに追加
 }
 ```
 
-## 使い方
+## 使用方法
 
-1. RenderDocを起動し、キャプチャファイル (.rdc) を開く
-2. MCPクライアント (Claude等) から RenderDoc のデータにアクセス
+1. 启动 RenderDoc 并打开捕获文件 (.rdc)
+2. 从 MCP 客户端（Claude 等）访问 RenderDoc 的数据
 
-## MCPツール一覧
+## MCP 工具一览
 
-| ツール | 説明 |
+| 工具 | 说明 |
 |--------|------|
-| `get_capture_status` | キャプチャの読み込み状態を確認 |
-| `get_draw_calls` | ドローコール一覧を階層構造で取得 |
-| `get_draw_call_details` | 特定のドローコールの詳細情報を取得 |
-| `get_shader_info` | シェーダーのソースコード・定数バッファの値を取得 |
-| `get_buffer_contents` | バッファの内容を取得 (Base64) |
-| `get_texture_info` | テクスチャのメタデータを取得 |
-| `get_texture_data` | テクスチャのピクセルデータを取得 (Base64) |
-| `get_pipeline_state` | パイプライン状態を取得 |
-| `get_output_merger_state` | 指定イベントのDSV/RTV・深度/ステンシル・ブレンド・UAV状態を取得 |
-| `list_shader_hashes` | シェーダーバイトコードのCRC32 hashを一覧 |
-| `find_resource_usage` | Texture/buffer usage history including Copy/Clear/Resolve |
+| `get_capture_status` | 查看捕获的加载状态 |
+| `get_draw_calls` | 以层级结构获取 draw call 列表 |
+| `get_draw_call_details` | 获取指定 draw call 的详细信息 |
+| `get_shader_info` | 获取着色器源码与常量缓冲区的值 |
+| `get_buffer_contents` | 获取缓冲区内容（Base64，或用 `output_path` 导出到文件） |
+| `get_texture_info` | 获取纹理的元数据 |
+| `get_texture_data` | 获取纹理像素数据（Base64，或用 `output_path` 导出到文件） |
+| `get_pipeline_state` | 获取管线状态 |
+| `get_output_merger_state` | 获取指定事件的 DSV/RTV、深度/模板、混合、UAV 状态 |
+| `list_shader_hashes` | 列出着色器字节码的 CRC32 hash |
+| `find_resource_usage` | 纹理/缓冲区的使用历史，含 Copy/Clear/Resolve |
+| `get_dlssg_events` | RenderDoc fork 的 DLSS Frame Generation evaluate（输入输出、相机、已保存输出）以及每个 Present 的输出来源 |
+| `get_debug_capabilities` | 查询本次捕获是否支持着色器调试 / 像素历史 |
+| `debug_pixel` | 单像素的 pixel shader 逐指令调试 |
+| `debug_vertex` | 单顶点的 vertex shader 逐指令调试 |
+| `debug_thread` | 单线程的 compute（或 mesh）shader 逐指令调试 |
+| `pixel_history` | 某个像素被哪些 fragment 写过，以及各自被哪项测试丢弃 |
+
+## 着色器调试与像素历史 (`shader-debug-1`)
+
+对应 `ReplayController` 的 `DebugPixel` / `DebugVertex` / `DebugThread` /
+`DebugMeshThread` / `ContinueDebug` / `FreeTrace` / `PixelHistory`。
+先用 `get_debug_capabilities()` 确认 `shader_debugging` 与 `pixel_history`
+这两个 `APIProperties` 能力位：D3D11 (DXBC) 与 D3D12 (DXBC/DXIL) 支持，
+其他 API 可能不支持。
+
+```python
+get_debug_capabilities()
+
+# 调试某个 draw 写入 (x, y) 的那个 fragment
+debug_pixel(event_id=2479, x=960, y=540)
+debug_pixel(event_id=2479, x=960, y=540, primitive=12, sample=0)
+
+# 只要最终变量值，不要逐步记录（可以跑更多步）
+debug_pixel(event_id=2479, x=960, y=540, include_steps=False, max_steps=20000)
+
+# 顶点与计算线程
+debug_vertex(event_id=2479, vertex=3, instance=0)
+debug_thread(event_id=3100, group=[2, 0, 0], thread=[7, 7, 0])
+
+# 这个像素到底被谁改成了这个颜色
+pixel_history(event_id=2479, x=960, y=540)
+```
+
+- 一次请求只拥有一条 trace：`DebugPixel` 之后在同一个 replay callback 里跑完
+  `ContinueDebug` 循环，再 `FreeTrace`，所以调试句柄不会跨 IPC 调用存活，
+  请求被取消或失败也不会泄漏。
+- 调试会扰乱 replay 状态，因此结束后会用 `SetFrameEvent(event_id, True)`
+  重新选中请求的事件（与 RenderDoc 自带的 shader viewer 行为一致）。
+  GUI 的选中项不变。
+- 步数与时间都有上限：`max_steps`（1–20000，默认 512）、
+  `time_budget_ms`（1–25000，默认 8000，在 ContinueDebug 批次之间协作检查，
+  单个批次无法中断）。IPC 请求本身仍有 30 秒期限。
+  长着色器会被截断而不是跑完——把 `last_state` 当作着色器输出之前，
+  先看 `stop_reason` 与 `truncated`。
+- `x` / `y` 始终以左上角为原点，且位于所选 mip 的分辨率下（GL 也一样）。
+- `debug_vertex` 的 `index` 省略时按 RenderDoc mesh viewer 的规则推导：
+  indexed draw 读 `indexOffset+vertex` 处的索引值再加 `baseVertex`（负值钳到 0），
+  否则用 `vertex+vertexOffset`。结果里的 `vertex_lookup` 会说明用了哪条规则、
+  实际读到的原始索引是多少。
+- `supported=false` 一定带 `reason`：像素没有被覆盖、着色器没有调试信息、
+  或者该 API 不支持——不会返回一条静默的空 trace。
+  `debug_info.debuggable` 与 `debug_info.debug_status` 来自反射信息，
+  能说明着色器为什么不能调试。
+- `shader_events` 汇总了产生 NaN/Inf 的步号、`DebugBreak` 步号与
+  sample/load/gather 次数，适合直接定位数值问题。
+- `include_changes` / `include_source` / `include_variables` 控制每步的
+  变量前后值、源码行映射与累积变量；`include_constants`（默认关闭）和
+  `include_source_mapping`（默认关闭）会显著增大响应。
+- `pixel_history` 会先定位到 `event_id`，所以之后的事件不会计入。
+  默认检查该事件当前绑定的第一个 render target（并沿用其 `firstMip`/`firstSlice`），
+  也可以用 `target_resource_id` 指定纹理。
+  每条记录给出 `pre_mod` / `shader_out` / `post_mod` 与 `failed_tests`
+  （`depth_test_failed`、`shader_discarded`、`backface_culled`、
+  `scissor_clipped`、`stencil_test_failed` 等）；`passed_event_ids` 是真正写入了
+  该像素的事件。深度目标读 `pre_mod.depth` / `post_mod.depth`，
+  颜色在 `color_float` / `color_uint` / `color_int` 里。
+  坐标越界、mip/slice/sample 越界会在调用原生 API 之前就被拒绝。
+- 调试在 replay 队列上异步执行（`AsyncInvoke`），不会用 `BlockInvoke`
+  长时间占住 UI 线程，所以请求超时/取消都能协作生效。
+  调用前可以查 `get_bridge_info().feature_info.shader_debug` 的
+  `revision`、`service_revision` 与 `dependencies_coherent`，
+  确认运行中的 RenderDoc 真的加载了这部分代码。
+
+## DLSS Frame Generation events (`dlssg-events-1`)
+
+`get_dlssg_events(max_evaluates=64)` reads the two chunks the RenderDoc fork
+(`C:\renderdoc`, `d3d12_ngx.cpp`) adds; upstream RenderDoc writes neither.
+`NGX::DLSSG_Evaluate` is the command-list chunk of one
+`NVSDK_NGX_D3D12_EvaluateFeature` for NGX feature 11, replayed as a Copy action
+named `DLSS-G Evaluate #N (i/n)`; each entry returns its NGX result, multi-frame
+index/count, reset, every resource role (Backbuffer, Depth, MotionVectors,
+HUDLess, UI, UIAlpha, BidirectionalDistortionField, OutputInterpolated,
+OutputReal, OutputDisableInterpolation) with names, and all camera/flag
+parameters. `Internal::DLSSG_SavedOutputs` (matched by `eval_seq`) lists the
+outputs read back while capturing, sizes only; image bytes are never read. An
+evaluate without that chunk replays with stale outputs.
+
+Every Present also reports the last copy into its image and, when an earlier
+evaluate in the same capture names the copy source, that source's role. Classify
+by evaluate, not by resource name: Streamline's `dlfg-output_0/1` clones swap the
+OutputInterpolated/OutputReal roles every evaluate. `evaluate_count = 0` means no
+evaluate list was submitted inside the captured present interval (with DLSS-G a
+single interval can hold only the pacer copy), not that frame generation was off.
+`get_frame_summary` counts the same actions as `statistics.dlssg_evaluates`.
+One metadata-only replay callback, zero `SetFrameEvent`.
 
 ## Resource search performance and portability (1.2)
 
@@ -216,27 +311,27 @@ pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")
 This uses upstream extension reload and does not require closing the capture.
 Existing in-memory code is not replaced merely by copying files to disk.
 
-## 使用例
+## 使用示例
 
-### ドローコール一覧の取得
+### 获取 draw call 列表
 
 ```
 get_draw_calls(include_children=true)
 ```
 
-### シェーダー情報の取得
+### 获取着色器信息
 
 ```
 get_shader_info(event_id=123, stage="pixel")
 ```
 
-### パイプライン状態の取得
+### 获取管线状态
 
 ```
 get_pipeline_state(event_id=123)
 ```
 
-### シェーダーハッシュ一覧の取得
+### 获取着色器 hash 列表
 
 ```
 list_shader_hashes(stage="pixel", event_id_min=8000, event_id_max=9000)
@@ -278,74 +373,99 @@ list_shader_hashes(stage="pixel", method="bounded_replay",
                    max_events=16, time_budget_ms=2000)
 ```
 
-### 指定イベントのリソース取得
+### 读取指定事件的资源
 
-`get_texture_data` と `get_buffer_contents` は `event_id` を指定できる。
-指定したイベントの実行直後まで移動してから、同一の replay callback 内でデータを読み出す。
-事前の `get_pipeline_state` 呼び出しは不要。
+`get_texture_data` 与 `get_buffer_contents` 都可以指定 `event_id`：
+先移动到该事件执行完毕的位置，再在同一个 replay callback 内读出数据。
+不需要事先调用 `get_pipeline_state`。
 
 ```python
 get_texture_data(event_id=1200, resource_id="ResourceId::22573", mip=0, slice=0, sample=0)
 get_buffer_contents(event_id=1200, resource_id="ResourceId::12345", offset=256, length=512)
 ```
 
-- `event_id` はキャプチャ内に存在する正の整数。draw/dispatch 以外の API イベントも指定可能。
-- `resource_id` は `"ResourceId::12345"` または数値文字列 `"12345"`。
-- 応答には読み出しに使用した `event_id` が含まれる。
-- `event_id` を省略すると従来どおり現在の replay 状態を読み、応答の `event_id` は `null`。
-  GUI の選択イベントと replay 状態は一致するとは限らないため、GUI の ID を代入しない。
-- 読み出し後も replay は指定イベントに留まる。GUI の選択表示は変更しない。
-- 同じイベントを連続して指定する場合は `SetFrameEvent(event_id, False)` で現在の状態を再利用する。
-- buffer の `length=0` は `offset` から末尾まで。負の値や範囲外の読み出しはエラー。
-- 内容は `content_base64` に入る生バイト列。テクスチャの PNG/DDS 変換は行わない。
+- `event_id` 必须是捕获中实际存在的正整数；draw/dispatch 之外的 API 事件也可以。
+- `resource_id` 可写 `"ResourceId::12345"` 或纯数字字符串 `"12345"`。
+- 响应中会带上实际用于读取的 `event_id`。
+- 省略 `event_id` 时与以前一样读取当前 replay 状态，响应里的 `event_id` 为 `null`。
+  GUI 选中的事件与 replay 状态不一定一致，所以不要直接代入 GUI 上的 ID。
+- 读取之后 replay 仍停留在指定事件上；GUI 的选中显示不变。
+- 连续指定同一事件时，会用 `SetFrameEvent(event_id, False)` 复用当前状态。
+- 缓冲区的 `length=0` 表示从 `offset` 读到末尾；负值或越界读取会报错。
+- 内容是 `content_base64` 里的原始字节，不会把纹理转成 PNG/DDS。
 
-MCP サーバーと RenderDoc 拡張の両方を更新する必要がある。
+MCP 服务器与 RenderDoc 扩展两边都需要更新。
 
 ```powershell
 uv pip install --python .venv/Scripts/python.exe --reinstall-package renderdoc-mcp -e . --no-deps
 .venv/Scripts/python.exe scripts/install_extension.py
 ```
 
-更新後、MCP クライアント側の接続を再起動する。起動中の RenderDoc では Python Shell から
-`pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")` を実行すると、
-キャプチャを閉じずに拡張を再読み込みできる。RenderDoc が起動していなければ次回起動時に反映される。
+更新后请重启 MCP 客户端一侧的连接。对于正在运行的 RenderDoc，可以在 Python Shell 里执行
+`pyrenderdoc.Extensions().LoadExtension("renderdoc_mcp_bridge")`，
+不关闭捕获就重新加载扩展。如果 RenderDoc 没在运行，下次启动时自然生效。
 
-### テクスチャデータの取得
+### 获取纹理数据
 
 ```
-# 2Dテクスチャのmip 0を取得
+# 获取 2D 纹理的 mip 0
 get_texture_data(resource_id="ResourceId::123")
 
-# 特定のmipレベルを取得
+# 获取指定 mip 级别
 get_texture_data(resource_id="ResourceId::123", mip=2)
 
-# キューブマップの特定の面を取得 (0=X+, 1=X-, 2=Y+, 3=Y-, 4=Z+, 5=Z-)
+# 获取 cubemap 的指定面 (0=X+, 1=X-, 2=Y+, 3=Y-, 4=Z+, 5=Z-)
 get_texture_data(resource_id="ResourceId::456", slice=3)
 
-# 3Dテクスチャの特定の深度スライスを取得
+# 获取 3D 纹理的指定深度切片
 get_texture_data(resource_id="ResourceId::789", depth_slice=5)
 ```
 
-### バッファデータの部分取得
+### 部分读取缓冲区数据
 
 ```
-# バッファ全体を取得
+# 获取整个缓冲区
 get_buffer_contents(resource_id="ResourceId::123")
 
-# オフセット256から512バイト取得
+# 从偏移 256 读取 512 字节
 get_buffer_contents(resource_id="ResourceId::123", offset=256, length=512)
 ```
 
-## 要件
+### 大数据导出到文件 (`output_path`)
+
+MCP 的 stdio 传输中，单条消息超过 16 MB 客户端（Claude）会直接断开连接。
+FastMCP 会把 dict 结果发两遍（`content` 和 `structuredContent`），
+所以走 Base64 时原始数据上限约 5.6 MB（1920x1080 RGBA8 = 8.3 MB、
+2560x1440 RGBA8 = 14.7 MB 都不行）。
+服务器会在断连之前，对超过约 15 MB（`RENDERDOC_MCP_MAX_RESPONSE_BYTES`）的结果直接返回错误。
+
+给 `get_texture_data` / `get_buffer_contents` 传 `output_path`
+（RenderDoc 所在机器上的绝对路径），扩展会把原始字节写入文件，只返回元数据。
+
+```
+# 写出到文件（会创建父目录，已存在的文件会被替换）
+get_texture_data(resource_id="ResourceId::3677", event_id=12790, output_path="D:\\dumps\\final.bin")
+# → {..., "width": 2560, "height": 1440, "format": "R8G8B8A8_UNORM", "data_length": 14745600,
+#     "output_path": "D:\\dumps\\final.bin", "bytes_written": 14745600, "sha256": "..."}
+
+# 传已存在的目录（或以分隔符结尾的路径）则自动命名
+# texture_<id>_e<event|cur>_mip<m>_slice<s>[_sample<n>][_z<d>].bin
+# buffer_<id>_e<event|cur>_off<offset>_len<length>.bin
+get_buffer_contents(resource_id="ResourceId::59424", event_id=12384, output_path="D:\\dumps\\")
+```
+
+## 环境要求
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/)
-- RenderDoc 1.20+
+- RenderDoc 1.20+（着色器调试的新签名 `DebugPixel(x, y, DebugPixelInputs)` 需要 1.46+，
+  更老的运行时会自动回退到旧的位置参数形式）
 
-> **Note**: 既存ツールはWindows + DirectX 11で動作確認済み。1.2の索引検索と非同期経路はWindows + DirectX 12の実キャプチャでも検証しました。
-> Linux/macOS + Vulkan/OpenGL環境でも動作する可能性がありますが、未検証です。
+> **注意**: 现有工具已在 Windows + DirectX 11 上验证。1.2 的索引检索与异步路径
+> 也在 Windows + DirectX 12 的真实捕获上验证过。
+> Linux/macOS + Vulkan/OpenGL 环境也可能可用，但未经验证。
 
-## ライセンス
+## 许可证
 
 MIT
 
